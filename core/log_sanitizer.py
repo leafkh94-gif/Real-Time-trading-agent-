@@ -5,6 +5,30 @@ Uses value-based redaction so secrets are caught even without a label prefix.
 import logging
 from pathlib import Path
 
+# Substring patterns (matched against the UPPERCASED key name) that mark a value
+# as sensitive. Anything matching has its value redacted from logs. Non-matching
+# config (e.g. ENVIRONMENT, AWS_REGION) is left intact so logs stay readable.
+_SENSITIVE_KEY_PATTERNS = (
+    "KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE", "ACCOUNT",
+)
+
+
+def _is_sensitive_key(key: str) -> bool:
+    upper = key.upper()
+    if upper.endswith("_ID") or upper == "ID":
+        return True
+    return any(pattern in upper for pattern in _SENSITIVE_KEY_PATTERNS)
+
+
+def sensitive_values(secrets: dict[str, str]) -> list[str]:
+    """
+    Select only the values whose key names look sensitive. This catches every real
+    secret (BROKER_API_KEY, *_SECRET, *_TOKEN, *_ACCOUNT_ID, *_CHAT_ID, ...) while
+    avoiding over-redaction of harmless config values that would otherwise turn
+    debugging output into a wall of ***REDACTED***.
+    """
+    return [v for k, v in secrets.items() if _is_sensitive_key(k)]
+
 
 class SecretRedactor(logging.Filter):
     REDACTED = "***REDACTED***"
@@ -40,8 +64,7 @@ def setup_logging(log_dir: str = "logs", level: int = logging.INFO) -> None:
 
     Path(log_dir).mkdir(exist_ok=True)
 
-    all_secrets = list(_secrets.get_secrets().values())
-    redactor = SecretRedactor(all_secrets)
+    redactor = SecretRedactor(sensitive_values(_secrets.get_secrets()))
 
     root = logging.getLogger()
     root.setLevel(level)

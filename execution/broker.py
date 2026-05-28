@@ -5,6 +5,7 @@ This makes it structurally impossible to bypass the gates in any concrete adapte
 """
 import logging
 from abc import ABC, abstractmethod
+from typing import final
 
 from alerts.notifier import Notifier
 from core.kill_switch import KillSwitch
@@ -41,10 +42,11 @@ class BrokerAdapter(ABC):
 
     # ── Public API ────────────────────────────────────────────────────────────
 
+    @final
     def place_order(self, signal: Signal) -> Order:
         """
-        Template method. Cannot be overridden by subclasses.
-        Enforces kill switch and risk limits before any order reaches the broker.
+        Template method. Marked @final so type checkers reject any subclass that
+        overrides it — the kill-switch and risk gates below cannot be bypassed.
         """
         # Gate 1 — kill switch (checked first; cheapest)
         if self._switch.check():

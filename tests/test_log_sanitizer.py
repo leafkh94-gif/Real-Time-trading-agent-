@@ -1,14 +1,7 @@
 """Tests for core/log_sanitizer.py"""
 import logging
 import pytest
-from core.log_sanitizer import SecretRedactor
-
-
-@pytest.fixture
-def handler():
-    """In-memory log handler to capture records."""
-    h = logging.handlers.MemoryHandler(capacity=100, flushLevel=logging.CRITICAL)
-    return h
+from core.log_sanitizer import SecretRedactor, sensitive_values, _is_sensitive_key
 
 
 def make_logger(secrets: list[str]) -> tuple[logging.Logger, list[logging.LogRecord]]:
@@ -91,5 +84,42 @@ def test_longest_secret_matched_first():
     assert "***REDACTED***" in msg
 
 
-# logging.handlers import needed for MemoryHandler in the fixture hint
-import logging.handlers
+# ── Sensitive-key selection (avoids over-redacting config) ────────────────────
+
+@pytest.mark.parametrize("key", [
+    "BROKER_API_KEY", "BROKER_API_SECRET", "BROKER_ACCOUNT_ID",
+    "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "DB_PASSWORD", "AWS_CREDENTIAL",
+])
+def test_sensitive_keys_detected(key):
+    assert _is_sensitive_key(key) is True
+
+
+@pytest.mark.parametrize("key", ["ENVIRONMENT", "AWS_REGION", "LOG_LEVEL", "VALIDATION"])
+def test_non_sensitive_keys_ignored(key):
+    assert _is_sensitive_key(key) is False
+
+
+def test_sensitive_values_filters_config():
+    secrets = {
+        "BROKER_API_KEY": "sk_live_abc1234567",
+        "TELEGRAM_BOT_TOKEN": "telegram_tok_987654",
+        "ENVIRONMENT": "development",
+        "AWS_REGION": "us-east-1",
+    }
+    values = sensitive_values(secrets)
+    assert "sk_live_abc1234567" in values
+    assert "telegram_tok_987654" in values
+    # Non-secret config must NOT be redacted, so it must NOT be in the value list
+    assert "development" not in values
+    assert "us-east-1" not in values
+
+
+def test_config_value_not_redacted_end_to_end():
+    """Regression: harmless config like 'us-east-1' stays readable in logs."""
+    secrets = {"BROKER_API_KEY": "sk_live_realsecret99", "AWS_REGION": "us-east-1"}
+    logger, records = make_logger(sensitive_values(secrets))
+    logger.info("region us-east-1 connecting with sk_live_realsecret99")
+    msg = records[-1].getMessage()
+    assert "us-east-1" in msg                 # config preserved
+    assert "sk_live_realsecret99" not in msg  # secret redacted
+    assert "***REDACTED***" in msg

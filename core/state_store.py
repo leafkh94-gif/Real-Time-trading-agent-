@@ -4,7 +4,7 @@ Survives process restarts — daily totals accumulate correctly across crashes.
 """
 import sqlite3
 from pathlib import Path
-from datetime import date
+from datetime import datetime, timezone
 from typing import NamedTuple
 
 DB_PATH = Path("state/bot.db")
@@ -41,7 +41,9 @@ class StateStore:
     # ── Daily stats ──────────────────────────────────────────────────────────
 
     def _today(self) -> str:
-        return date.today().isoformat()
+        # UTC so the trading-day boundary is deterministic regardless of host timezone,
+        # and consistent with the kill-switch timestamps and the 00:05-UTC S3 backup.
+        return datetime.now(timezone.utc).date().isoformat()
 
     def get_today(self) -> DailyStats:
         cur = self.conn.execute(
