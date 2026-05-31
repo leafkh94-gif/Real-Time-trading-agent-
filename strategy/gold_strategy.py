@@ -4,6 +4,7 @@ Chains: H4 regime filter → H1 liquidity sweep → alignment check → ML filte
 Outputs a Signal or None. Never touches the broker or any core module.
 """
 import logging
+import os
 from typing import Optional
 
 from execution.models import Signal
@@ -13,6 +14,16 @@ from strategy.regime_filter import RegimeFilter
 from strategy.signal_filter import MLSignalFilter, SignalFilter
 
 logger = logging.getLogger(__name__)
+
+
+def _default_signal_filter() -> SignalFilter:
+    """Use ClaudeSignalFilter when ANTHROPIC_API_KEY is present, else passthrough."""
+    if os.getenv("ANTHROPIC_API_KEY"):
+        from strategy.claude_filter import ClaudeSignalFilter
+        logger.info("ClaudeSignalFilter active (claude-opus-4-8)")
+        return ClaudeSignalFilter()
+    logger.info("MLSignalFilter active (passthrough — set ANTHROPIC_API_KEY to enable Claude)")
+    return MLSignalFilter()
 
 
 class GoldStrategy(StrategyBase):
@@ -26,7 +37,7 @@ class GoldStrategy(StrategyBase):
         self.lots = lots
         self.regime_filter = regime_filter or RegimeFilter()
         self.sweep_detector = sweep_detector or LiquiditySweepDetector()
-        self.signal_filter = signal_filter or MLSignalFilter()
+        self.signal_filter = signal_filter or _default_signal_filter()
 
     def evaluate(self, candles: MultiTimeframeCandles) -> Optional[Signal]:
         h4 = candles.get(TF_H4, [])
