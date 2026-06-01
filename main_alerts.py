@@ -1,0 +1,206 @@
+"""
+main_alerts.py — multi-market alert bot (no execution, no broker login).
+
+Watches Gold, S&P 500, Nasdaq 100, and Dow Jones via Yahoo Finance (free).
+When GoldStrategy detects a setup it sends a Telegram message with
+entry price, take profit, and stop loss — no trades are placed.
+
+Usage:
+  python main_alerts.py
+
+Required .env keys:
+  TELEGRAM_BOT_TOKEN
+  TELEGRAM_CHAT_ID
+
+No Capital.com or TradingView account required.
+"""
+import logging
+import os
+import signal
+import sys
+import time
+from dataclasses import dataclass, field
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from alerts.notifier import NullNotifier, TelegramNotifier
+from core.log_sanitizer import setup_logging
+from strategy.base import TF_H1
+from strategy.gold_strategy import GoldStrategy
+from strategy.indicators import atr as _atr
+from strategy.yahoo_feed import YahooFinanceFeed
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+
+SCAN_INTERVAL_S  = 5 * 60     # seconds between full watchlist scans
+ALERT_COOLDOWN_S = 60 * 60    # minimum seconds before re-alerting the same instrument
+TP_ATR_MULT      = 2.5        # take-profit = entry ± (ATR × 2.5)
+SL_ATR_MULT      = 1.5        # stop-loss   = entry ± (ATR × 1.5)
+
+
+@dataclass
+class _Instrument:
+    epic: str
+    name: str
+    _last_alert: float = field(default=0.0, init=False, repr=False)
+
+    def on_cooldown(self) -> bool:
+        return time.time() - self._last_alert < ALERT_COOLDOWN_S
+
+    def mark_alerted(self) -> None:
+        self._last_alert = time.time()
+
+
+WATCHLIST: list[_Instrument] = [
+    _Instrument("GOLD",  "Gold (XAU/USD)"),
+    _Instrument("US500", "S&P 500"),
+    _Instrument("US100", "Nasdaq 100"),
+    _Instrument("US30",  "Dow Jones (US30)"),
+]
+
+# ── Graceful shutdown ─────────────────────────────────────────────────────────
+
+_running = True
+
+
+def _handle_shutdown(sig, frame):  # noqa: ARG001
+    global _running
+    logging.getLogger(__name__).info("Shutdown signal — stopping alert loop")
+    _running = False
+
+
+# ── Alert formatting ──────────────────────────────────────────────────────────
+
+def _build_message(instr: _Instrument, direction: str,
+                   entry: float, tp: float, sl: float) -> tuple[str, str]:
+    """Return (html, plain) alert strings."""
+    emoji     = "🟢" if direction == "buy" else "🔴"
+    dir_label = "BUY"  if direction == "buy" else "SELL"
+    risk      = abs(entry - sl)
+    reward    = abs(entry - tp)
+    rr        = reward / risk if risk > 0 else 0.0
+    tp_pct    = (reward / entry) * 100
+    sl_pct    = (risk   / entry) * 100
+
+    html_lines = [
+        f"{emoji} <b>TRADE SETUP — {instr.name}</b>",
+        "",
+        f"Direction:    <b>{dir_label}</b>",
+        f"Entry:        <b>{entry:,.2f}</b>",
+        f"Take Profit:  <b>{tp:,.2f}</b>  (+{tp_pct:.1f}%)",
+        f"Stop Loss:    <b>{sl:,.2f}</b>  (-{sl_pct:.1f}%)",
+        f"R:R Ratio:    1 : {rr:.1f}",
+        "",
+        "<i>Alert only — always confirm before trading.</i>",
+    ]
+    plain_lines = [line.replace("<b>", "").replace("</b>", "")
+                       .replace("<i>", "").replace("</i>", "")
+                   for line in html_lines]
+    return "\n".join(html_lines), "\n".join(plain_lines)
+
+
+def _notify(notifier, html: str, plain: str) -> None:
+    if hasattr(notifier, "send_html"):
+        notifier.send_html(html)
+    else:
+        notifier.send(plain)
+
+
+# ── Per-instrument scan ───────────────────────────────────────────────────────
+
+def _scan_one(instr: _Instrument, feed: YahooFinanceFeed,
+              strategy: GoldStrategy, notifier, logger: logging.Logger) -> None:
+    if instr.on_cooldown():
+        logger.debug("%s: cooldown active — skipping", instr.epic)
+        return
+
+    try:
+        candles = feed.get_candles()
+    except Exception as exc:
+        logger.error("%s: feed error: %s", instr.epic, exc)
+        return
+
+    h1 = candles.get(TF_H1, [])
+    if not h1:
+        logger.debug("%s: no H1 candles returned", instr.epic)
+        return
+
+    sig = strategy.evaluate(candles)
+    if sig is None:
+        logger.debug("%s: no signal", instr.epic)
+        return
+
+    # ── ATR-based TP / SL ─────────────────────────────────────────────────
+    atr_series = _atr(h1, period=14)
+    valid_atr  = [v for v in atr_series if v == v]   # strip leading NaN
+    if not valid_atr:
+        logger.warning("%s: ATR unavailable — skipping alert", instr.epic)
+        return
+
+    current_atr = valid_atr[-1]
+    entry       = h1[-1].close
+
+    if sig.direction == "buy":
+        tp = entry + TP_ATR_MULT * current_atr
+        sl = entry - SL_ATR_MULT * current_atr
+    else:
+        tp = entry - TP_ATR_MULT * current_atr
+        sl = entry + SL_ATR_MULT * current_atr
+
+    html, plain = _build_message(instr, sig.direction, entry, tp, sl)
+    _notify(notifier, html, plain)
+    instr.mark_alerted()
+    logger.info("Alert sent: %s %s  entry=%.2f  tp=%.2f  sl=%.2f  atr=%.2f",
+                instr.epic, sig.direction.upper(), entry, tp, sl, current_atr)
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main() -> None:
+    setup_logging()
+    logger = logging.getLogger(__name__)
+
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    signal.signal(signal.SIGINT, _handle_shutdown)
+
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id   = os.getenv("TELEGRAM_CHAT_ID", "")
+
+    if bot_token and chat_id:
+        notifier = TelegramNotifier(bot_token, chat_id)
+        logger.info("Telegram notifier ready (chat_id=%s)", chat_id)
+    else:
+        notifier = NullNotifier()
+        logger.warning(
+            "No Telegram credentials found — alerts will be logged only.\n"
+            "Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to your .env file."
+        )
+
+    # One feed per instrument (Yahoo Finance — no auth required)
+    feeds: dict[str, YahooFinanceFeed] = {
+        instr.epic: YahooFinanceFeed(instr.epic) for instr in WATCHLIST
+    }
+
+    strategy  = GoldStrategy()
+    epic_list = ", ".join(i.epic for i in WATCHLIST)
+    logger.info("Alert bot running — watching %s, scanning every %ds",
+                epic_list, SCAN_INTERVAL_S)
+
+    while _running:
+        for instr in WATCHLIST:
+            if not _running:
+                break
+            _scan_one(instr, feeds[instr.epic], strategy, notifier, logger)
+            time.sleep(1)   # brief pause between instruments
+
+        if _running:
+            logger.debug("Scan complete — sleeping %ds", SCAN_INTERVAL_S)
+            time.sleep(SCAN_INTERVAL_S)
+
+    logger.info("Alert bot stopped cleanly.")
+
+
+if __name__ == "__main__":
+    main()
