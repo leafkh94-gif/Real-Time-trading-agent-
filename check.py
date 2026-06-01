@@ -292,6 +292,22 @@ except ImportError:
 except Exception as e:
     fail("Webhook receiver", traceback.format_exc(limit=2).strip())
 
+# ── 11. Alert bot imports ─────────────────────────────────────────────────────
+
+section("11. Alert bot (import check)")
+
+try:
+    import importlib
+    mod = importlib.import_module("main_alerts")
+    # verify key symbols exist
+    assert hasattr(mod, "WATCHLIST"), "WATCHLIST missing"
+    assert hasattr(mod, "main"), "main() missing"
+    assert len(mod.WATCHLIST) >= 4, f"expected ≥4 instruments, got {len(mod.WATCHLIST)}"
+    epics = [i.epic for i in mod.WATCHLIST]
+    ok("main_alerts imports OK", f"watching {', '.join(epics)}")
+except Exception as e:
+    fail("main_alerts", traceback.format_exc(limit=2).strip())
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 print(f"\n{'='*52}")
