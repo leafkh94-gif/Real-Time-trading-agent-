@@ -54,6 +54,7 @@ _packages = [
     ("requests",  "requests"),
     ("fastapi",   "fastapi"),
     ("uvicorn",   "uvicorn"),
+    ("yfinance",  "yfinance"),
 ]
 for mod, pkg in _packages:
     try:
@@ -299,14 +300,17 @@ section("11. Alert bot (import check)")
 try:
     import importlib
     mod = importlib.import_module("main_alerts")
-    # verify key symbols exist
     assert hasattr(mod, "WATCHLIST"), "WATCHLIST missing"
     assert hasattr(mod, "main"), "main() missing"
     assert len(mod.WATCHLIST) >= 4, f"expected ≥4 instruments, got {len(mod.WATCHLIST)}"
     epics = [i.epic for i in mod.WATCHLIST]
     ok("main_alerts imports OK", f"watching {', '.join(epics)}")
+
+    from strategy.yahoo_feed import YahooFinanceFeed, TICKER_MAP
+    assert "GOLD" in TICKER_MAP and "US500" in TICKER_MAP
+    ok("YahooFinanceFeed imports OK", f"tickers: {', '.join(TICKER_MAP.values())}")
 except Exception as e:
-    fail("main_alerts", traceback.format_exc(limit=2).strip())
+    fail("main_alerts / yahoo_feed", traceback.format_exc(limit=2).strip())
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
