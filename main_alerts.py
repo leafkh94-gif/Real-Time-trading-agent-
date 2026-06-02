@@ -205,8 +205,15 @@ def main() -> None:
 
     strategy  = GoldStrategy()
     epic_list = ", ".join(i.epic for i in WATCHLIST)
-    logger.info("Alert bot running — watching %s, scanning every %ds",
-                epic_list, SCAN_INTERVAL_S)
+
+    # Optional bounded runtime (used by the cloud runner so each job exits
+    # cleanly and the next queued run takes over). 0/unset = run forever.
+    max_runtime_s = int(os.getenv("MAX_RUNTIME_S", "0"))
+    start_time    = time.time()
+
+    logger.info("Alert bot running — watching %s, scanning every %ds%s",
+                epic_list, SCAN_INTERVAL_S,
+                f", max runtime {max_runtime_s}s" if max_runtime_s else "")
 
     while _running:
         for instr in WATCHLIST:
@@ -217,6 +224,10 @@ def main() -> None:
             except Exception as exc:
                 logger.error("Unexpected error scanning %s: %s", instr.epic, exc)
             time.sleep(3)   # stagger requests to avoid Yahoo Finance rate limits
+
+        if max_runtime_s and (time.time() - start_time) >= max_runtime_s:
+            logger.info("Max runtime reached — exiting cleanly for handoff.")
+            break
 
         if _running:
             logger.debug("Scan complete — sleeping %ds", SCAN_INTERVAL_S)

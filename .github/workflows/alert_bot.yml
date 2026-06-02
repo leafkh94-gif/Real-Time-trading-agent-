@@ -1,13 +1,30 @@
-name: Gold Alert Bot
+name: Trading Alert Bot
+
+# Reliable 24/7 coverage on a PUBLIC repo (unlimited free Actions minutes).
+#
+# How it works:
+#   * Each run executes main_alerts.py, which scans all 4 markets every 5 min.
+#   * MAX_RUNTIME_S makes the run exit cleanly after ~5h40m (under the 6h job cap).
+#   * The `concurrency` group allows at most one run live + one queued. While a
+#     run is active, each watchdog tick queues a replacement; GitHub keeps only
+#     the newest queued one. When the active run ends, the queued run starts
+#     immediately — continuous coverage with no duplicate runners.
+#   * The watchdog `schedule` is also the recovery path: if the chain ever dies,
+#     the next tick restarts it (worst-case gap ~10 min).
 
 on:
+  workflow_dispatch:        # manual start / restart from the Actions tab
   schedule:
-    - cron: '*/15 * * * *'  # every 15 minutes
-  workflow_dispatch:          # allow manual trigger from GitHub UI
+    - cron: '*/10 * * * *'  # watchdog: keeps a replacement queued / recovers the chain
+
+concurrency:
+  group: trading-bot
+  cancel-in-progress: false  # never kill the live run; queue the replacement instead
 
 jobs:
-  scan:
+  run:
     runs-on: ubuntu-latest
+    timeout-minutes: 355     # hard ceiling; main_alerts exits before this via MAX_RUNTIME_S
 
     steps:
       - name: Checkout code
@@ -22,11 +39,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run market scan
-        run: python scan_once.py
+      - name: Run alert bot (continuous, ~5h40m then clean handoff)
+        run: python main_alerts.py
         env:
-          TELEGRAM_BOT_TOKEN:     ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:       ${{ secrets.TELEGRAM_CHAT_ID }}
-          ANTHROPIC_API_KEY:      ${{ secrets.ANTHROPIC_API_KEY }}
-          ALPHAVANTAGE_API_KEY:   ${{ secrets.ALPHAVANTAGE_API_KEY }}
-          ENVIRONMENT:            development
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+          ENVIRONMENT:        development
+          MAX_RUNTIME_S:      '20400'   # 340 min = 5h40m
+          PORT:               '8080'
