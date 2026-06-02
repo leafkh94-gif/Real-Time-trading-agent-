@@ -2,7 +2,7 @@ name: Gold Alert Bot
 
 on:
   schedule:
-    - cron: '*/5 * * * *'   # every 5 minutes
+    - cron: '*/15 * * * *'  # every 15 minutes
   workflow_dispatch:          # allow manual trigger from GitHub UI
 
 jobs:
@@ -11,10 +11,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0
         with:
           python-version: '3.12'
           cache: pip
@@ -25,7 +25,8 @@ jobs:
       - name: Run market scan
         run: python scan_once.py
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
-          ENVIRONMENT:        development
+          TELEGRAM_BOT_TOKEN:     ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:       ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY:      ${{ secrets.ANTHROPIC_API_KEY }}
+          ALPHAVANTAGE_API_KEY:   ${{ secrets.ALPHAVANTAGE_API_KEY }}
+          ENVIRONMENT:            development

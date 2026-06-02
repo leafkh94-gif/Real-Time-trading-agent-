@@ -4,6 +4,7 @@ Called by GitHub Actions every 5 minutes.
 """
 import logging
 import os
+import time
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -62,6 +63,8 @@ def main() -> None:
         try:
             candles = YahooFinanceFeed(epic).get_candles()
             h1      = candles.get(TF_H1, [])
+            h4      = candles.get("H4", [])
+            log.info("%s: %d H1 candles, %d H4 candles", epic, len(h1), len(h4))
             if not h1:
                 continue
 
@@ -92,6 +95,8 @@ def main() -> None:
 
         except Exception as exc:
             log.error("%s: %s", epic, exc)
+
+        time.sleep(3)   # stagger requests to avoid Yahoo Finance rate limits
 
     log.info("Scan complete — %d alert(s) sent.", alerts_sent)
 

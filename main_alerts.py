@@ -18,8 +18,10 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
 
@@ -118,42 +120,58 @@ def _scan_one(instr: _Instrument, feed: YahooFinanceFeed,
 
     try:
         candles = feed.get_candles()
+
+        h1 = candles.get(TF_H1, [])
+        if not h1:
+            logger.debug("%s: no H1 candles returned", instr.epic)
+            return
+
+        sig = strategy.evaluate(candles)
+        if sig is None:
+            logger.debug("%s: no signal", instr.epic)
+            return
+
+        # ── ATR-based TP / SL ─────────────────────────────────────────────────
+        atr_series = _atr(h1, period=14)
+        valid_atr  = [v for v in atr_series if v == v]   # strip leading NaN
+        if not valid_atr:
+            logger.warning("%s: ATR unavailable — skipping alert", instr.epic)
+            return
+
+        current_atr = valid_atr[-1]
+        entry       = h1[-1].close
+
+        if sig.direction == "buy":
+            tp = entry + TP_ATR_MULT * current_atr
+            sl = entry - SL_ATR_MULT * current_atr
+        else:
+            tp = entry - TP_ATR_MULT * current_atr
+            sl = entry + SL_ATR_MULT * current_atr
+
+        html, plain = _build_message(instr, sig.direction, entry, tp, sl)
+        _notify(notifier, html, plain)
+        instr.mark_alerted()
+        logger.info("Alert sent: %s %s  entry=%.2f  tp=%.2f  sl=%.2f  atr=%.2f",
+                    instr.epic, sig.direction.upper(), entry, tp, sl, current_atr)
     except Exception as exc:
-        logger.error("%s: feed error: %s", instr.epic, exc)
-        return
+        logger.error("%s: scan error: %s", instr.epic, exc)
 
-    h1 = candles.get(TF_H1, [])
-    if not h1:
-        logger.debug("%s: no H1 candles returned", instr.epic)
-        return
 
-    sig = strategy.evaluate(candles)
-    if sig is None:
-        logger.debug("%s: no signal", instr.epic)
-        return
+# ── Health server (keeps Render free tier alive) ──────────────────────────────
 
-    # ── ATR-based TP / SL ─────────────────────────────────────────────────
-    atr_series = _atr(h1, period=14)
-    valid_atr  = [v for v in atr_series if v == v]   # strip leading NaN
-    if not valid_atr:
-        logger.warning("%s: ATR unavailable — skipping alert", instr.epic)
-        return
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, *args): pass  # silence access logs
 
-    current_atr = valid_atr[-1]
-    entry       = h1[-1].close
 
-    if sig.direction == "buy":
-        tp = entry + TP_ATR_MULT * current_atr
-        sl = entry - SL_ATR_MULT * current_atr
-    else:
-        tp = entry - TP_ATR_MULT * current_atr
-        sl = entry + SL_ATR_MULT * current_atr
-
-    html, plain = _build_message(instr, sig.direction, entry, tp, sl)
-    _notify(notifier, html, plain)
-    instr.mark_alerted()
-    logger.info("Alert sent: %s %s  entry=%.2f  tp=%.2f  sl=%.2f  atr=%.2f",
-                instr.epic, sig.direction.upper(), entry, tp, sl, current_atr)
+def _start_health_server() -> None:
+    port = int(os.getenv("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logging.getLogger(__name__).info("Health server listening on port %d", port)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -164,6 +182,8 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _handle_shutdown)
     signal.signal(signal.SIGINT, _handle_shutdown)
+
+    _start_health_server()
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id   = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -192,8 +212,11 @@ def main() -> None:
         for instr in WATCHLIST:
             if not _running:
                 break
-            _scan_one(instr, feeds[instr.epic], strategy, notifier, logger)
-            time.sleep(1)   # brief pause between instruments
+            try:
+                _scan_one(instr, feeds[instr.epic], strategy, notifier, logger)
+            except Exception as exc:
+                logger.error("Unexpected error scanning %s: %s", instr.epic, exc)
+            time.sleep(3)   # stagger requests to avoid Yahoo Finance rate limits
 
         if _running:
             logger.debug("Scan complete — sleeping %ds", SCAN_INTERVAL_S)

@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: gold-alert-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main_alerts.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ENVIRONMENT
+        value: development
+
+  - type: cron
+    name: gold-alert-cron
+    env: python
+    plan: free
+    schedule: "*/15 * * * *"
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scan_once.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
