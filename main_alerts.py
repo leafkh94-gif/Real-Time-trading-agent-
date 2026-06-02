@@ -36,7 +36,7 @@ from strategy.yahoo_feed import YahooFinanceFeed
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-SCAN_INTERVAL_S  = 5 * 60     # seconds between full watchlist scans
+SCAN_INTERVAL_S  = 15 * 60    # seconds between full watchlist scans (H1 strategy — 15 min is ample)
 ALERT_COOLDOWN_S = 60 * 60    # minimum seconds before re-alerting the same instrument
 TP_ATR_MULT      = 2.5        # take-profit = entry ± (ATR × 2.5)
 SL_ATR_MULT      = 1.5        # stop-loss   = entry ± (ATR × 1.5)
