@@ -1,1 +1,1 @@
-worker: python main_alerts.py
+web: python main_alerts.py
