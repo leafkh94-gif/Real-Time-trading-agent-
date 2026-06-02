@@ -1,6 +1,11 @@
 """
-GoldStrategy — top-level strategy for XAU/USD.
-Chains: H4 regime filter → H1 liquidity sweep → alignment check → ML filter.
+GoldStrategy — top-level liquidity-sweep strategy.
+
+Despite the name (kept for backward compatibility), this strategy is
+instrument-agnostic and is applied to every market in the watchlist:
+Gold (XAU/USD), S&P 500, Nasdaq 100, and Dow Jones.
+
+Chains: H4 regime filter → H1 liquidity sweep → Claude/ML signal filter.
 Outputs a Signal or None. Never touches the broker or any core module.
 """
 import logging
