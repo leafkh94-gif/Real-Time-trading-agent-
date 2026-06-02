@@ -19,7 +19,7 @@ from strategy.signal_filter import SignalFilter
 logger = logging.getLogger(__name__)
 
 _MODEL = "claude-opus-4-8"
-_MAX_TOKENS = 64   # response is one word; budget room for thinking preamble
+_MAX_TOKENS = 1024  # adaptive thinking needs headroom; text reply is still one word
 _CONTEXT_BARS = 20
 
 _SYSTEM = (

@@ -45,36 +45,39 @@ class GoldStrategy(StrategyBase):
 
         # ── Gate 1: enough data ───────────────────────────────────────────────
         if len(h4) < self.regime_filter.min_candles:
-            logger.debug("not enough H4 candles (%d < %d)", len(h4), self.regime_filter.min_candles)
+            logger.info("gate1 SKIP: not enough H4 candles (%d < %d)", len(h4), self.regime_filter.min_candles)
             return None
         if len(h1) < self.sweep_detector.min_candles:
-            logger.debug("not enough H1 candles (%d < %d)", len(h1), self.sweep_detector.min_candles)
+            logger.info("gate1 SKIP: not enough H1 candles (%d < %d)", len(h1), self.sweep_detector.min_candles)
             return None
 
         # ── Gate 2: regime filter (H4) ────────────────────────────────────────
         regime = self.regime_filter.classify(h4)
+        logger.info("gate2: regime=%s", regime.value)
         if regime == MarketRegime.VOLATILE:
-            logger.debug("regime VOLATILE — skipping")
+            logger.info("gate2 SKIP: regime VOLATILE")
             return None
 
         # ── Gate 3: liquidity sweep (H1) ─────────────────────────────────────
         direction = self.sweep_detector.detect(h1)
         if direction is None:
-            logger.debug("no liquidity sweep detected")
+            logger.info("gate3 SKIP: no liquidity sweep detected")
             return None
+        logger.info("gate3 PASS: sweep direction=%s", direction)
 
         # ── Gate 4: regime-direction alignment ────────────────────────────────
         if regime == MarketRegime.TRENDING_UP and direction != "buy":
-            logger.debug("sweep direction %s misaligns with TRENDING_UP — skipping", direction)
+            logger.info("gate4 SKIP: sweep %s misaligns with TRENDING_UP", direction)
             return None
         if regime == MarketRegime.TRENDING_DOWN and direction != "sell":
-            logger.debug("sweep direction %s misaligns with TRENDING_DOWN — skipping", direction)
+            logger.info("gate4 SKIP: sweep %s misaligns with TRENDING_DOWN", direction)
             return None
+        logger.info("gate4 PASS: direction aligned with regime")
 
-        # ── Gate 5: ML filter ─────────────────────────────────────────────────
+        # ── Gate 5: ML / Claude filter ────────────────────────────────────────
         candidate = Signal(direction=direction, lots=self.lots)
         if not self.signal_filter.accept(candidate, h1):
-            logger.debug("ML filter rejected signal")
+            logger.info("gate5 SKIP: signal filter rejected")
             return None
 
         logger.info("signal generated: %s %.2f lots (regime=%s)", direction, self.lots, regime.value)
