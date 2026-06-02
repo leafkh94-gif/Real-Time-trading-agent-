@@ -18,8 +18,10 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
 
@@ -156,6 +158,23 @@ def _scan_one(instr: _Instrument, feed: YahooFinanceFeed,
                 instr.epic, sig.direction.upper(), entry, tp, sl, current_atr)
 
 
+# ── Health server (keeps Render free tier alive) ──────────────────────────────
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, *args): pass  # silence access logs
+
+
+def _start_health_server() -> None:
+    port = int(os.getenv("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), _HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logging.getLogger(__name__).info("Health server listening on port %d", port)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -164,6 +183,8 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, _handle_shutdown)
     signal.signal(signal.SIGINT, _handle_shutdown)
+
+    _start_health_server()
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id   = os.getenv("TELEGRAM_CHAT_ID", "")
