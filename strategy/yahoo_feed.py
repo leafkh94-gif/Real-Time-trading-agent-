@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Capital.com epic → Yahoo Finance ticker
 TICKER_MAP: dict[str, str] = {
-    "GOLD":  "GC=F",    # Gold Futures
+    "GOLD":  "GLD",    # Gold ETF
     "US500": "^GSPC",   # S&P 500
     "US100": "^NDX",    # Nasdaq 100
     "US30":  "^DJI",    # Dow Jones
