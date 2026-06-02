@@ -65,16 +65,9 @@ class GoldStrategy(StrategyBase):
             return None
         logger.info("gate3 PASS: sweep direction=%s", direction)
 
-        # ── Gate 4: regime-direction alignment ────────────────────────────────
-        if regime == MarketRegime.TRENDING_UP and direction != "buy":
-            logger.info("gate4 SKIP: sweep %s misaligns with TRENDING_UP", direction)
-            return None
-        if regime == MarketRegime.TRENDING_DOWN and direction != "sell":
-            logger.info("gate4 SKIP: sweep %s misaligns with TRENDING_DOWN", direction)
-            return None
-        logger.info("gate4 PASS: direction aligned with regime")
-
-        # ── Gate 5: ML / Claude filter ────────────────────────────────────────
+        # ── Gate 4: signal filter (Claude / ML) ───────────────────────────────
+        # Regime-direction alignment removed: liquidity sweeps are reversal
+        # signals by design, so the sweep direction stands on its own.
         candidate = Signal(direction=direction, lots=self.lots)
         if not self.signal_filter.accept(candidate, h1):
             logger.info("gate5 SKIP: signal filter rejected")
