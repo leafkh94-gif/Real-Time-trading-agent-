@@ -216,7 +216,7 @@ def main() -> None:
                 _scan_one(instr, feeds[instr.epic], strategy, notifier, logger)
             except Exception as exc:
                 logger.error("Unexpected error scanning %s: %s", instr.epic, exc)
-            time.sleep(1)   # brief pause between instruments
+            time.sleep(3)   # stagger requests to avoid Yahoo Finance rate limits
 
         if _running:
             logger.debug("Scan complete — sleeping %ds", SCAN_INTERVAL_S)

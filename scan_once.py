@@ -4,6 +4,7 @@ Called by GitHub Actions every 5 minutes.
 """
 import logging
 import os
+import time
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -94,6 +95,8 @@ def main() -> None:
 
         except Exception as exc:
             log.error("%s: %s", epic, exc)
+
+        time.sleep(3)   # stagger requests to avoid Yahoo Finance rate limits
 
     log.info("Scan complete — %d alert(s) sent.", alerts_sent)
 
