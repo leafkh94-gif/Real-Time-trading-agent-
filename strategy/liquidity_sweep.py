@@ -29,36 +29,33 @@ class LiquiditySweepDetector:
 
     def detect(self, candles: Sequence[Candle]) -> Optional[str]:
         """
-        Examines the most-recently completed candle (index -1).
+        Examines the last 3 completed candles for a liquidity sweep pattern.
         Returns 'buy', 'sell', or None.
         """
         if len(candles) < self.min_candles:
             return None
 
-        last = candles[-1]
         window = list(candles[-(self.lookback + self.sweep_lookback * 2 + 1):])
 
         sh = swing_highs(window, self.sweep_lookback)
         sl = swing_lows(window, self.sweep_lookback)
 
-        # Collect confirmed pivot levels (exclude the very last bar — it is the signal bar)
-        recent_highs = [v for v in sh[:-1] if v is not None]
-        recent_lows = [v for v in sl[:-1] if v is not None]
+        # Pivot levels — exclude the last 3 bars (the sweep candidates)
+        recent_highs = [v for v in sh[:-3] if v is not None]
+        recent_lows  = [v for v in sl[:-3] if v is not None]
 
-        # Bearish sweep of a swing low → buy signal
-        if recent_lows:
-            nearest_low = min(recent_lows, key=lambda lv: abs(lv - last.close))
-            swept_below = last.low < nearest_low
-            closed_above = last.close > nearest_low
-            if swept_below and closed_above:
-                return "buy"
+        # Check each of the last 3 bars as a potential sweep candle
+        for bar in list(candles)[-3:]:
+            # Bearish sweep of a swing low → buy signal
+            if recent_lows:
+                nearest_low = min(recent_lows, key=lambda lv: abs(lv - bar.close))
+                if bar.low < nearest_low and bar.close > nearest_low:
+                    return "buy"
 
-        # Bullish sweep of a swing high → sell signal
-        if recent_highs:
-            nearest_high = min(recent_highs, key=lambda hv: abs(hv - last.close))
-            swept_above = last.high > nearest_high
-            closed_below = last.close < nearest_high
-            if swept_above and closed_below:
-                return "sell"
+            # Bullish sweep of a swing high → sell signal
+            if recent_highs:
+                nearest_high = min(recent_highs, key=lambda hv: abs(hv - bar.close))
+                if bar.high > nearest_high and bar.close < nearest_high:
+                    return "sell"
 
         return None
