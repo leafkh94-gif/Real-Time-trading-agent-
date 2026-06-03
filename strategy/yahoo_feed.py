@@ -12,7 +12,7 @@ from strategy.feed import PriceFeed
 logger = logging.getLogger(__name__)
 
 TICKER_MAP: dict[str, str] = {
-    "GOLD":  "GLD",
+    "GOLD":  "GC=F",   # Gold futures — actual USD/oz price (GLD ETF was ~1/10th)
     "US500": "^GSPC",
     "US100": "^NDX",
     "US30":  "^DJI",
