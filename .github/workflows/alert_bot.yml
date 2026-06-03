@@ -3,23 +3,21 @@ name: Trading Alert Bot
 # Reliable 24/7 coverage on a PUBLIC repo (unlimited free Actions minutes).
 #
 # How it works:
-#   * Each run executes main_alerts.py, which scans all 4 markets every 5 min.
-#   * MAX_RUNTIME_S makes the run exit cleanly after ~5h40m (under the 6h job cap).
-#   * The `concurrency` group allows at most one run live + one queued. While a
-#     run is active, each watchdog tick queues a replacement; GitHub keeps only
-#     the newest queued one. When the active run ends, the queued run starts
-#     immediately — continuous coverage with no duplicate runners.
-#   * The watchdog `schedule` is also the recovery path: if the chain ever dies,
-#     the next tick restarts it (worst-case gap ~10 min).
+#   * Each run executes main_alerts.py for ~5h40m then exits cleanly.
+#   * At the end of each run a "self-chain" step triggers the next run via
+#     the GitHub API — guaranteed handoff with no gap, no cron scheduler needed.
+#   * The schedule cron is a recovery-only watchdog: if the chain ever dies for
+#     any reason, the next tick (worst-case ~60 min) restarts it automatically.
+#   * concurrency group prevents duplicate runners if cron and self-chain overlap.
 
 on:
   workflow_dispatch:        # manual start / restart from the Actions tab
   schedule:
-    - cron: '*/10 * * * *'  # watchdog: keeps a replacement queued / recovers the chain
+    - cron: '0 * * * *'    # recovery watchdog: hourly (cron is unreliable; self-chain is primary)
 
 concurrency:
   group: trading-bot
-  cancel-in-progress: false  # never kill the live run; queue the replacement instead
+  cancel-in-progress: false  # never kill the live run; let the new one queue
 
 jobs:
   run:
@@ -48,3 +46,13 @@ jobs:
           ENVIRONMENT:        development
           MAX_RUNTIME_S:      '20400'   # 340 min = 5h40m
           PORT:               '8080'
+
+      - name: Self-chain — queue the next run immediately
+        if: always()
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/alert_bot.yml/dispatches" \
+            -d '{"ref":"main"}'
+          echo "Next run queued."
