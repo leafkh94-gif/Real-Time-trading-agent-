@@ -78,6 +78,8 @@ def _handle_shutdown(sig, frame):  # noqa: ARG001
 def _build_message(instr: _Instrument, direction: str,
                    entry: float, tp: float, sl: float) -> tuple[str, str]:
     """Return (html, plain) alert strings."""
+    import datetime
+    now       = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     emoji     = "🟢" if direction == "buy" else "🔴"
     dir_label = "BUY"  if direction == "buy" else "SELL"
     risk      = abs(entry - sl)
@@ -88,6 +90,7 @@ def _build_message(instr: _Instrument, direction: str,
 
     html_lines = [
         f"{emoji} <b>TRADE SETUP — {instr.name}</b>",
+        f"<i>Signal detected: {now}</i>",
         "",
         f"Direction:    <b>{dir_label}</b>",
         f"Entry:        <b>{entry:,.2f}</b>",
