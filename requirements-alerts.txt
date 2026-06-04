@@ -1,0 +1,5 @@
+# Minimal dependencies for main_alerts.py (the cloud alert bot).
+# This installs in ~30s vs ~3min for the full requirements.txt.
+python-dotenv>=1.0.0
+requests>=2.31.0
+yfinance>=0.2.40

@@ -38,11 +38,12 @@ from strategy.yahoo_feed import YahooFinanceFeed
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-SCAN_INTERVAL_S  = 30 * 60    # seconds between full watchlist scans
-ALERT_COOLDOWN_S = 60 * 60    # minimum seconds before re-alerting the same instrument
-TP_ATR_MULT      = 2.5        # take-profit = entry ± (ATR × 2.5)
-SL_ATR_MULT      = 1.5        # stop-loss   = entry ± (ATR × 1.5)
-COOLDOWN_FILE    = os.getenv("COOLDOWN_FILE", ".alert_cooldown.json")
+SCAN_INTERVAL_S      = 30 * 60    # seconds between full watchlist scans
+ALERT_COOLDOWN_S     = 60 * 60    # minimum seconds before re-alerting the same instrument
+HEARTBEAT_INTERVAL_S = 24 * 60 * 60  # send a liveness ping every 24h if no alerts fired
+TP_ATR_MULT          = 2.5        # take-profit = entry ± (ATR × 2.5)
+SL_ATR_MULT          = 1.5        # stop-loss   = entry ± (ATR × 1.5)
+COOLDOWN_FILE        = os.getenv("COOLDOWN_FILE", ".alert_cooldown.json")
 
 
 @dataclass
@@ -145,6 +146,30 @@ def _notify(notifier, html: str, plain: str) -> None:
         notifier.send(plain)
 
 
+# ── Heartbeat ─────────────────────────────────────────────────────────────────
+
+_last_heartbeat: float = 0.0
+
+
+def _maybe_send_heartbeat(notifier, instruments: list, logger: logging.Logger) -> None:
+    """Send a 24h liveness ping only when no trade alert has fired recently."""
+    global _last_heartbeat
+    if time.time() - _last_heartbeat < HEARTBEAT_INTERVAL_S:
+        return
+    # Skip heartbeat if a real alert fired in the last 24h — not needed
+    if any(time.time() - i._last_alert < HEARTBEAT_INTERVAL_S for i in instruments):
+        _last_heartbeat = time.time()
+        return
+    markets = ", ".join(i.name for i in instruments)
+    html  = ("🤖 <b>Alert bot — daily check-in</b>\n"
+             f"<i>Watching: {markets}</i>\n"
+             "No trade setups in the last 24h — bot is running normally.")
+    plain = f"Alert bot — daily check-in. Watching {markets}. No setups in 24h."
+    _notify(notifier, html, plain)
+    _last_heartbeat = time.time()
+    logger.info("Daily heartbeat sent")
+
+
 # ── Per-instrument scan ───────────────────────────────────────────────────────
 
 def _scan_one(instr: _Instrument, feed: YahooFinanceFeed,
@@ -245,6 +270,15 @@ def main() -> None:
 
     _load_cooldowns(WATCHLIST)
 
+    # Startup confirmation — lets you know the cloud run picked up cleanly
+    import datetime as _dt
+    _startup_time = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    _notify(notifier,
+            f"🟡 <b>Alert bot started</b> — <i>{_startup_time}</i>\n"
+            "Watching Gold, S&amp;P 500, Nasdaq 100, Dow Jones. Scanning every 30 min.",
+            f"Alert bot started {_startup_time}. Watching Gold, S&P 500, Nasdaq, Dow. Scanning every 30 min.")
+    logger.info("Startup notification sent")
+
     strategy  = GoldStrategy()
     epic_list = ", ".join(i.epic for i in WATCHLIST)
 
@@ -266,6 +300,8 @@ def main() -> None:
             except Exception as exc:
                 logger.error("Unexpected error scanning %s: %s", instr.epic, exc)
             time.sleep(3)   # stagger requests to avoid Yahoo Finance rate limits
+
+        _maybe_send_heartbeat(notifier, WATCHLIST, logger)
 
         if max_runtime_s and (time.time() - start_time) >= max_runtime_s:
             logger.info("Max runtime reached — exiting cleanly for handoff.")
