@@ -14,6 +14,7 @@ Required .env keys:
 
 No Capital.com or TradingView account required.
 """
+import json
 import logging
 import os
 import signal
@@ -32,14 +33,16 @@ from core.log_sanitizer import setup_logging
 from strategy.base import TF_H1
 from strategy.gold_strategy import GoldStrategy
 from strategy.indicators import atr as _atr
+from strategy.market_hours import is_tradeable
 from strategy.yahoo_feed import YahooFinanceFeed
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-SCAN_INTERVAL_S  = 15 * 60    # seconds between full watchlist scans (H1 strategy — 15 min is ample)
+SCAN_INTERVAL_S  = 30 * 60    # seconds between full watchlist scans
 ALERT_COOLDOWN_S = 60 * 60    # minimum seconds before re-alerting the same instrument
 TP_ATR_MULT      = 2.5        # take-profit = entry ± (ATR × 2.5)
 SL_ATR_MULT      = 1.5        # stop-loss   = entry ± (ATR × 1.5)
+COOLDOWN_FILE    = os.getenv("COOLDOWN_FILE", ".alert_cooldown.json")
 
 
 @dataclass
@@ -61,6 +64,35 @@ WATCHLIST: list[_Instrument] = [
     _Instrument("US100", "Nasdaq 100"),
     _Instrument("US30",  "Dow Jones (US30)"),
 ]
+
+# ── Cooldown persistence ─────────────────────────────────────────────────────
+
+def _load_cooldowns(instruments: list) -> None:
+    try:
+        with open(COOLDOWN_FILE) as f:
+            data = json.load(f)
+        for instr in instruments:
+            ts = data.get(instr.epic, 0.0)
+            if ts:
+                instr._last_alert = float(ts)
+        logging.getLogger(__name__).info("Cooldown state restored from %s", COOLDOWN_FILE)
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+
+
+def _save_cooldown(instr) -> None:
+    try:
+        try:
+            with open(COOLDOWN_FILE) as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {}
+        data[instr.epic] = instr._last_alert
+        with open(COOLDOWN_FILE, "w") as f:
+            json.dump(data, f)
+    except OSError as exc:
+        logging.getLogger(__name__).warning("Could not save cooldown state: %s", exc)
+
 
 # ── Graceful shutdown ─────────────────────────────────────────────────────────
 
@@ -121,6 +153,10 @@ def _scan_one(instr: _Instrument, feed: YahooFinanceFeed,
         logger.debug("%s: cooldown active — skipping", instr.epic)
         return
 
+    if not is_tradeable(instr.epic):
+        logger.info("%s: outside trading hours — skipping", instr.epic)
+        return
+
     try:
         candles = feed.get_candles()
 
@@ -154,6 +190,7 @@ def _scan_one(instr: _Instrument, feed: YahooFinanceFeed,
         html, plain = _build_message(instr, sig.direction, entry, tp, sl)
         _notify(notifier, html, plain)
         instr.mark_alerted()
+        _save_cooldown(instr)
         logger.info("Alert sent: %s %s  entry=%.2f  tp=%.2f  sl=%.2f  atr=%.2f",
                     instr.epic, sig.direction.upper(), entry, tp, sl, current_atr)
     except Exception as exc:
@@ -205,6 +242,8 @@ def main() -> None:
     feeds: dict[str, YahooFinanceFeed] = {
         instr.epic: YahooFinanceFeed(instr.epic) for instr in WATCHLIST
     }
+
+    _load_cooldowns(WATCHLIST)
 
     strategy  = GoldStrategy()
     epic_list = ", ".join(i.epic for i in WATCHLIST)

@@ -49,13 +49,13 @@ class LiquiditySweepDetector:
         for bar in list(candles)[-2:]:
             # Bearish sweep of a swing low → buy signal
             if recent_lows:
-                nearest_low = min(recent_lows, key=lambda lv: abs(lv - bar.close))
+                nearest_low = recent_lows[-1]   # most recent swing low by time
                 if bar.low < nearest_low and bar.close > nearest_low:
                     return "buy"
 
             # Bullish sweep of a swing high → sell signal
             if recent_highs:
-                nearest_high = min(recent_highs, key=lambda hv: abs(hv - bar.close))
+                nearest_high = recent_highs[-1]  # most recent swing high by time
                 if bar.high > nearest_high and bar.close < nearest_high:
                     return "sell"
 
