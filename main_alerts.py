@@ -170,32 +170,48 @@ def _maybe_send_heartbeat(notifier, instruments: list, logger: logging.Logger) -
     logger.info("Daily heartbeat sent")
 
 
+# ── US index consensus ────────────────────────────────────────────────────────
+
+_US_INDEX_EPICS = frozenset({"US500", "US100", "US30"})
+
 # ── Per-instrument scan ───────────────────────────────────────────────────────
 
-def _scan_one(instr: _Instrument, feed: YahooFinanceFeed,
-              strategy: GoldStrategy, notifier, logger: logging.Logger) -> None:
+def _evaluate_one(instr: _Instrument, feed: YahooFinanceFeed,
+                  strategy: GoldStrategy, logger: logging.Logger):
+    """
+    Fetch candles and evaluate strategy.
+    Returns (candles, direction) if a signal is found, else None.
+    Does NOT send an alert — caller decides after consensus check.
+    """
     if instr.on_cooldown():
         logger.debug("%s: cooldown active — skipping", instr.epic)
-        return
+        return None
 
     if not is_tradeable(instr.epic):
         logger.info("%s: outside trading hours — skipping", instr.epic)
-        return
+        return None
 
     try:
         candles = feed.get_candles()
-
         h1 = candles.get(TF_H1, [])
         if not h1:
             logger.debug("%s: no H1 candles returned", instr.epic)
-            return
-
+            return None
         sig = strategy.evaluate(candles)
         if sig is None:
             logger.debug("%s: no signal", instr.epic)
-            return
+            return None
+        return candles, sig.direction
+    except Exception as exc:
+        logger.error("%s: evaluation error: %s", instr.epic, exc)
+        return None
 
-        # ── ATR-based TP / SL ─────────────────────────────────────────────────
+
+def _send_alert(instr: _Instrument, candles, direction: str,
+                notifier, logger: logging.Logger) -> None:
+    """Calculate ATR-based TP/SL and send the Telegram alert."""
+    try:
+        h1 = candles.get(TF_H1, [])
         atr_series = _atr(h1, period=14)
         valid_atr  = [v for v in atr_series if v == v]   # strip leading NaN
         if not valid_atr:
@@ -205,21 +221,21 @@ def _scan_one(instr: _Instrument, feed: YahooFinanceFeed,
         current_atr = valid_atr[-1]
         entry       = h1[-1].close
 
-        if sig.direction == "buy":
+        if direction == "buy":
             tp = entry + TP_ATR_MULT * current_atr
             sl = entry - SL_ATR_MULT * current_atr
         else:
             tp = entry - TP_ATR_MULT * current_atr
             sl = entry + SL_ATR_MULT * current_atr
 
-        html, plain = _build_message(instr, sig.direction, entry, tp, sl)
+        html, plain = _build_message(instr, direction, entry, tp, sl)
         _notify(notifier, html, plain)
         instr.mark_alerted()
         _save_cooldown(instr)
         logger.info("Alert sent: %s %s  entry=%.2f  tp=%.2f  sl=%.2f  atr=%.2f",
-                    instr.epic, sig.direction.upper(), entry, tp, sl, current_atr)
+                    instr.epic, direction.upper(), entry, tp, sl, current_atr)
     except Exception as exc:
-        logger.error("%s: scan error: %s", instr.epic, exc)
+        logger.error("%s: alert error: %s", instr.epic, exc)
 
 
 # ── Health server (keeps Render free tier alive) ──────────────────────────────
@@ -292,14 +308,34 @@ def main() -> None:
                 f", max runtime {max_runtime_s}s" if max_runtime_s else "")
 
     while _running:
+        # ── Phase 1: evaluate every instrument, collect pending signals ────────
+        pending: dict[str, tuple] = {}   # epic -> (instr, candles, direction)
         for instr in WATCHLIST:
             if not _running:
                 break
-            try:
-                _scan_one(instr, feeds[instr.epic], strategy, notifier, logger)
-            except Exception as exc:
-                logger.error("Unexpected error scanning %s: %s", instr.epic, exc)
+            result = _evaluate_one(instr, feeds[instr.epic], strategy, logger)
+            if result is not None:
+                candles, direction = result
+                pending[instr.epic] = (instr, candles, direction)
             time.sleep(3)   # stagger requests to avoid Yahoo Finance rate limits
+
+        # ── Phase 2: US index consensus — suppress the lone contradicting signal
+        us_pending = {e: v for e, v in pending.items() if e in _US_INDEX_EPICS}
+        if len(us_pending) >= 2:
+            buy_count  = sum(1 for _, _, d in us_pending.values() if d == "buy")
+            sell_count = sum(1 for _, _, d in us_pending.values() if d == "sell")
+            consensus  = "buy" if buy_count > sell_count else "sell"
+            for epic in list(pending.keys()):
+                if epic in _US_INDEX_EPICS and pending[epic][2] != consensus:
+                    logger.info(
+                        "%s: suppressed — contradicts US index consensus "
+                        "(%d buy / %d sell → %s)", epic, buy_count, sell_count, consensus
+                    )
+                    del pending[epic]
+
+        # ── Phase 3: send all approved alerts ────────────────────────────────
+        for epic, (instr, candles, direction) in pending.items():
+            _send_alert(instr, candles, direction, notifier, logger)
 
         _maybe_send_heartbeat(notifier, WATCHLIST, logger)
 
