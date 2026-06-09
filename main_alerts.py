@@ -324,14 +324,15 @@ def main() -> None:
         if len(us_pending) >= 2:
             buy_count  = sum(1 for _, _, d in us_pending.values() if d == "buy")
             sell_count = sum(1 for _, _, d in us_pending.values() if d == "sell")
-            consensus  = "buy" if buy_count > sell_count else "sell"
-            for epic in list(pending.keys()):
-                if epic in _US_INDEX_EPICS and pending[epic][2] != consensus:
-                    logger.info(
-                        "%s: suppressed — contradicts US index consensus "
-                        "(%d buy / %d sell → %s)", epic, buy_count, sell_count, consensus
-                    )
-                    del pending[epic]
+            if buy_count != sell_count:   # tie → no consensus, send both
+                consensus = "buy" if buy_count > sell_count else "sell"
+                for epic in list(pending.keys()):
+                    if epic in _US_INDEX_EPICS and pending[epic][2] != consensus:
+                        logger.info(
+                            "%s: suppressed — contradicts US index consensus "
+                            "(%d buy / %d sell → %s)", epic, buy_count, sell_count, consensus
+                        )
+                        del pending[epic]
 
         # ── Phase 3: send all approved alerts ────────────────────────────────
         for epic, (instr, candles, direction) in pending.items():
