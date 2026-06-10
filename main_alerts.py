@@ -33,23 +33,21 @@ from alerts.notifier import NullNotifier, TelegramNotifier
 from core.log_sanitizer import setup_logging
 from strategy.base import TF_H1, TF_H4
 from strategy.gold_strategy import GoldStrategy
-from strategy.indicators import atr as _atr, adx as _adx
+from strategy.indicators import atr as _atr, ema as _ema, swing_highs, swing_lows
 from strategy.market_hours import is_tradeable
 from strategy.news_filter import high_impact_news_within
-from strategy.sr_levels import key_levels, near_key_level
 from strategy.yahoo_feed import YahooFinanceFeed
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-SCAN_INTERVAL_S        = 30 * 60    # seconds between full watchlist scans
-ALERT_COOLDOWN_S       = 4 * 60 * 60  # 4 hours between alerts — one trade at a time per instrument
-HEARTBEAT_INTERVAL_S   = 24 * 60 * 60  # send a liveness ping every 24h if no alerts fired
-TP_ATR_MULT            = 2.5        # take-profit = entry ± (ATR × 2.5)
-SL_ATR_MULT            = 1.5        # stop-loss   = entry ± (ATR × 1.5)
-COOLDOWN_FILE          = os.getenv("COOLDOWN_FILE", ".alert_cooldown.json")
-ADX_TRENDING_THRESHOLD = 20         # suppress signals when H4 ADX < this (choppy market)
-NEWS_BLOCK_WINDOW_MIN  = 30         # block alerts within this many minutes of high-impact USD news
-SR_CONFLUENCE_ATR_MULT = 1.0        # entry must be within this × H1 ATR of a key S/R level
+SCAN_INTERVAL_S       = 30 * 60       # seconds between full watchlist scans
+ALERT_COOLDOWN_S      = 4 * 60 * 60   # 4 hours between alerts — one trade at a time
+HEARTBEAT_INTERVAL_S  = 24 * 60 * 60  # daily liveness ping if no alerts fired
+SL_ATR_MULT           = 1.5           # stop-loss   = entry ± (ATR × 1.5)
+MIN_RR_RATIO          = 2.0           # minimum reward:risk — skip if swing TP gives less
+EMA_TREND_STRENGTH_PCT = 1.5          # % spread between EMA20/EMA50 that defines a rocket trend
+NEWS_BLOCK_WINDOW_MIN = 30            # block alerts within ±30 min of high-impact USD news
+COOLDOWN_FILE         = os.getenv("COOLDOWN_FILE", ".alert_cooldown.json")
 
 
 @dataclass
@@ -180,22 +178,40 @@ def _maybe_send_heartbeat(notifier, instruments: list, logger: logging.Logger) -
 
 _US_INDEX_EPICS = frozenset({"US500", "US100", "US30"})
 
+
+# ── Swing-based TP helper ─────────────────────────────────────────────────────
+
+def _nearest_swing_tp(h1: list, entry: float, direction: str) -> float | None:
+    """
+    Return the nearest H1 swing high (for BUY) or swing low (for SELL)
+    beyond the entry price — the first structural target the market must reach.
+    Returns None if no clear swing level exists in the direction of the trade.
+    """
+    sh = swing_highs(h1, lookback=5)
+    sl = swing_lows( h1, lookback=5)
+    if direction == "buy":
+        candidates = [v for v in sh if v is not None and v > entry]
+        return min(candidates) if candidates else None   # nearest swing high above entry
+    else:
+        candidates = [v for v in sl if v is not None and v < entry]
+        return max(candidates) if candidates else None   # nearest swing low below entry
+
+
 # ── Per-instrument scan ───────────────────────────────────────────────────────
 
 def _evaluate_one(instr: _Instrument, feed: YahooFinanceFeed,
                   strategy: GoldStrategy, logger: logging.Logger):
     """
-    Fetch candles and evaluate strategy through a four-gate filter pipeline.
-    Returns (candles, direction) if all gates pass, else None.
-    Does NOT send an alert — caller decides after consensus check.
+    Fetch candles and run the full filter pipeline.
+    Returns (candles, direction, swing_tp) if all gates pass, else None.
 
-    Gate order (cheapest/fastest checks first):
-      1. Cooldown         — skip if already alerted recently
-      2. Market hours     — skip outside trading session
-      3. News window      — skip ±30 min around high-impact USD events
-      4. ADX regime       — skip when H4 ADX < 20 (choppy/ranging market)
-      5. Strategy signal  — liquidity sweep + EMA regime
-      6. S/R confluence   — skip if entry is not near a key price level
+    Gate order (cheapest first):
+      1. Cooldown     — skip if alerted in the last 4 hours
+      2. Market hours — skip outside trading session
+      3. News window  — skip ±30 min around high-impact USD events
+      4. Strategy     — sweep (wick quality) + BOS / CHOCH confirmation + EMA regime
+      5. EMA distance — suppress counter-trend signals in rocket-trend markets
+      6. R:R          — skip if nearest swing target gives less than 1:2
     """
     if instr.on_cooldown():
         logger.debug("%s: cooldown active — skipping", instr.epic)
@@ -219,69 +235,83 @@ def _evaluate_one(instr: _Instrument, feed: YahooFinanceFeed,
             logger.debug("%s: no H1 candles returned", instr.epic)
             return None
 
-        # Gate 4 — ADX: suppress signals in choppy/ranging H4 conditions
-        if h4:
-            adx_vals = _adx(h4, period=14)
-            valid_adx = [v for v in adx_vals if not math.isnan(v)]
-            if valid_adx:
-                last_adx = valid_adx[-1]
-                if last_adx < ADX_TRENDING_THRESHOLD:
-                    logger.info("%s: ADX %.1f < %d — choppy market, skipping",
-                                instr.epic, last_adx, ADX_TRENDING_THRESHOLD)
-                    return None
-                logger.debug("%s: ADX %.1f — trending, proceeding", instr.epic, last_adx)
-
-        # Gate 5 — Strategy signal
+        # Gate 4 — Strategy: sweep + BOS + EMA regime filter (inside GoldStrategy)
         sig = strategy.evaluate(candles)
         if sig is None:
             logger.debug("%s: no signal", instr.epic)
             return None
 
-        # Gate 6 — S/R confluence: entry should be near a significant level
-        if h4 and h1:
-            atr_series = _atr(h1, period=14)
-            valid_atr  = [v for v in atr_series if v == v]
-            if valid_atr:
-                current_atr = valid_atr[-1]
-                entry       = h1[-1].close
-                levels      = key_levels(h4, h1)
-                if not near_key_level(entry, levels, current_atr, SR_CONFLUENCE_ATR_MULT):
-                    nearest = min(levels, key=lambda lv: abs(entry - lv)) if levels else None
-                    dist    = abs(entry - nearest) if nearest is not None else float("inf")
-                    logger.info(
-                        "%s: entry %.2f not near key level "
-                        "(nearest %.2f, dist %.1f vs threshold %.1f) — skipping",
-                        instr.epic, entry,
-                        nearest or 0, dist, SR_CONFLUENCE_ATR_MULT * current_atr,
-                    )
-                    return None
+        # Gate 5 — EMA trend strength: suppress counter-trend in rocket markets
+        if h4:
+            closes = [c.close for c in h4]
+            e20 = _ema(closes, 20)
+            e50 = _ema(closes, 50)
+            if (not math.isnan(e20[-1]) and not math.isnan(e50[-1]) and e50[-1] > 0):
+                spread_pct = (e20[-1] - e50[-1]) / e50[-1] * 100
+                if abs(spread_pct) > EMA_TREND_STRENGTH_PCT:
+                    is_bull = spread_pct > 0
+                    if (is_bull and sig.direction == "sell") or \
+                       (not is_bull and sig.direction == "buy"):
+                        logger.info(
+                            "%s: EMA20/50 spread %.2f%% — suppressing counter-trend "
+                            "%s in rocket market",
+                            instr.epic, spread_pct, sig.direction,
+                        )
+                        return None
 
-        return candles, sig.direction
+        # Gate 6 — R:R: swing-based TP must give at least MIN_RR_RATIO
+        atr_series = _atr(h1, period=14)
+        valid_atr  = [v for v in atr_series if v == v]
+        if not valid_atr:
+            logger.debug("%s: ATR unavailable — skipping", instr.epic)
+            return None
+        current_atr = valid_atr[-1]
+        entry       = h1[-1].close
+
+        swing_tp = _nearest_swing_tp(h1, entry, sig.direction)
+        if swing_tp is None:
+            logger.info("%s: no clear swing target in trade direction — skipping", instr.epic)
+            return None
+
+        sl     = entry - SL_ATR_MULT * current_atr if sig.direction == "buy" \
+                 else entry + SL_ATR_MULT * current_atr
+        risk   = abs(entry - sl)
+        reward = abs(swing_tp - entry)
+        rr     = reward / risk if risk > 0 else 0.0
+
+        if rr < MIN_RR_RATIO:
+            logger.info(
+                "%s: R:R %.2f < %.1f (entry %.2f → tp %.2f, sl %.2f) — skipping",
+                instr.epic, rr, MIN_RR_RATIO, entry, swing_tp, sl,
+            )
+            return None
+
+        logger.info(
+            "%s: signal %s  entry=%.2f  tp=%.2f  sl=%.2f  R:R=1:%.1f",
+            instr.epic, sig.direction.upper(), entry, swing_tp, sl, rr,
+        )
+        return candles, sig.direction, swing_tp
+
     except Exception as exc:
         logger.error("%s: evaluation error: %s", instr.epic, exc)
         return None
 
 
 def _send_alert(instr: _Instrument, candles, direction: str,
-                notifier, logger: logging.Logger) -> None:
-    """Calculate ATR-based TP/SL and send the Telegram alert."""
+                tp: float, notifier, logger: logging.Logger) -> None:
+    """Compute ATR-based SL, format the message, and send the Telegram alert."""
     try:
         h1 = candles.get(TF_H1, [])
         atr_series = _atr(h1, period=14)
-        valid_atr  = [v for v in atr_series if v == v]   # strip leading NaN
+        valid_atr  = [v for v in atr_series if v == v]
         if not valid_atr:
             logger.warning("%s: ATR unavailable — skipping alert", instr.epic)
             return
 
         current_atr = valid_atr[-1]
         entry       = h1[-1].close
-
-        if direction == "buy":
-            tp = entry + TP_ATR_MULT * current_atr
-            sl = entry - SL_ATR_MULT * current_atr
-        else:
-            tp = entry - TP_ATR_MULT * current_atr
-            sl = entry + SL_ATR_MULT * current_atr
+        sl = entry - SL_ATR_MULT * current_atr if direction == "buy" \
+             else entry + SL_ATR_MULT * current_atr
 
         html, plain = _build_message(instr, direction, entry, tp, sl)
         _notify(notifier, html, plain)
@@ -364,21 +394,21 @@ def main() -> None:
 
     while _running:
         # ── Phase 1: evaluate every instrument, collect pending signals ────────
-        pending: dict[str, tuple] = {}   # epic -> (instr, candles, direction)
+        pending: dict[str, tuple] = {}   # epic -> (instr, candles, direction, swing_tp)
         for instr in WATCHLIST:
             if not _running:
                 break
             result = _evaluate_one(instr, feeds[instr.epic], strategy, logger)
             if result is not None:
-                candles, direction = result
-                pending[instr.epic] = (instr, candles, direction)
+                candles, direction, swing_tp = result
+                pending[instr.epic] = (instr, candles, direction, swing_tp)
             time.sleep(3)   # stagger requests to avoid Yahoo Finance rate limits
 
         # ── Phase 2: US index consensus — suppress the lone contradicting signal
         us_pending = {e: v for e, v in pending.items() if e in _US_INDEX_EPICS}
         if len(us_pending) >= 2:
-            buy_count  = sum(1 for _, _, d in us_pending.values() if d == "buy")
-            sell_count = sum(1 for _, _, d in us_pending.values() if d == "sell")
+            buy_count  = sum(1 for _, _, d, _ in us_pending.values() if d == "buy")
+            sell_count = sum(1 for _, _, d, _ in us_pending.values() if d == "sell")
             if buy_count != sell_count:   # tie → no consensus, send both
                 consensus = "buy" if buy_count > sell_count else "sell"
                 for epic in list(pending.keys()):
@@ -390,8 +420,8 @@ def main() -> None:
                         del pending[epic]
 
         # ── Phase 3: send all approved alerts ────────────────────────────────
-        for epic, (instr, candles, direction) in pending.items():
-            _send_alert(instr, candles, direction, notifier, logger)
+        for epic, (instr, candles, direction, swing_tp) in pending.items():
+            _send_alert(instr, candles, direction, swing_tp, notifier, logger)
 
         _maybe_send_heartbeat(notifier, WATCHLIST, logger)
 
