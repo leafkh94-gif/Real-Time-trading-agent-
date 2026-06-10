@@ -24,7 +24,7 @@ class LiquiditySweepDetector:
         lookback: int = 20,
         sweep_lookback: int = 3,
         atr_period: int = 14,
-        min_wick_atr: float = 0.3,
+        min_wick_atr: float = 0.2,
         min_close_atr: float = 0.2,
     ):
         """
