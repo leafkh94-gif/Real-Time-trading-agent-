@@ -41,7 +41,7 @@ from strategy.yahoo_feed import YahooFinanceFeed
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 SCAN_INTERVAL_S       = 30 * 60       # seconds between full watchlist scans
-ALERT_COOLDOWN_S      = 4 * 60 * 60   # 4 hours between alerts — one trade at a time
+ALERT_COOLDOWN_S      = 0             # no cooldown — CHOCH/BOS confirmation prevents repeats
 HEARTBEAT_INTERVAL_S  = 24 * 60 * 60  # daily liveness ping if no alerts fired
 SL_ATR_MULT           = 1.5           # stop-loss   = entry ± (ATR × 1.5)
 MIN_RR_RATIO          = 2.0           # minimum reward:risk — skip if swing TP gives less
