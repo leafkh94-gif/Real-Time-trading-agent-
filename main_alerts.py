@@ -16,6 +16,7 @@ No Capital.com or TradingView account required.
 """
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -30,20 +31,25 @@ load_dotenv()
 
 from alerts.notifier import NullNotifier, TelegramNotifier
 from core.log_sanitizer import setup_logging
-from strategy.base import TF_H1
+from strategy.base import TF_H1, TF_H4
 from strategy.gold_strategy import GoldStrategy
-from strategy.indicators import atr as _atr
+from strategy.indicators import atr as _atr, adx as _adx
 from strategy.market_hours import is_tradeable
+from strategy.news_filter import high_impact_news_within
+from strategy.sr_levels import key_levels, near_key_level
 from strategy.yahoo_feed import YahooFinanceFeed
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-SCAN_INTERVAL_S      = 30 * 60    # seconds between full watchlist scans
-ALERT_COOLDOWN_S     = 60 * 60    # minimum seconds before re-alerting the same instrument
-HEARTBEAT_INTERVAL_S = 24 * 60 * 60  # send a liveness ping every 24h if no alerts fired
-TP_ATR_MULT          = 2.5        # take-profit = entry ± (ATR × 2.5)
-SL_ATR_MULT          = 1.5        # stop-loss   = entry ± (ATR × 1.5)
-COOLDOWN_FILE        = os.getenv("COOLDOWN_FILE", ".alert_cooldown.json")
+SCAN_INTERVAL_S        = 30 * 60    # seconds between full watchlist scans
+ALERT_COOLDOWN_S       = 60 * 60    # minimum seconds before re-alerting the same instrument
+HEARTBEAT_INTERVAL_S   = 24 * 60 * 60  # send a liveness ping every 24h if no alerts fired
+TP_ATR_MULT            = 2.5        # take-profit = entry ± (ATR × 2.5)
+SL_ATR_MULT            = 1.5        # stop-loss   = entry ± (ATR × 1.5)
+COOLDOWN_FILE          = os.getenv("COOLDOWN_FILE", ".alert_cooldown.json")
+ADX_TRENDING_THRESHOLD = 20         # suppress signals when H4 ADX < this (choppy market)
+NEWS_BLOCK_WINDOW_MIN  = 30         # block alerts within this many minutes of high-impact USD news
+SR_CONFLUENCE_ATR_MULT = 1.0        # entry must be within this × H1 ATR of a key S/R level
 
 
 @dataclass
@@ -179,9 +185,17 @@ _US_INDEX_EPICS = frozenset({"US500", "US100", "US30"})
 def _evaluate_one(instr: _Instrument, feed: YahooFinanceFeed,
                   strategy: GoldStrategy, logger: logging.Logger):
     """
-    Fetch candles and evaluate strategy.
-    Returns (candles, direction) if a signal is found, else None.
+    Fetch candles and evaluate strategy through a four-gate filter pipeline.
+    Returns (candles, direction) if all gates pass, else None.
     Does NOT send an alert — caller decides after consensus check.
+
+    Gate order (cheapest/fastest checks first):
+      1. Cooldown         — skip if already alerted recently
+      2. Market hours     — skip outside trading session
+      3. News window      — skip ±30 min around high-impact USD events
+      4. ADX regime       — skip when H4 ADX < 20 (choppy/ranging market)
+      5. Strategy signal  — liquidity sweep + EMA regime
+      6. S/R confluence   — skip if entry is not near a key price level
     """
     if instr.on_cooldown():
         logger.debug("%s: cooldown active — skipping", instr.epic)
@@ -191,16 +205,57 @@ def _evaluate_one(instr: _Instrument, feed: YahooFinanceFeed,
         logger.info("%s: outside trading hours — skipping", instr.epic)
         return None
 
+    if high_impact_news_within(NEWS_BLOCK_WINDOW_MIN):
+        logger.info("%s: high-impact USD news within %dm — skipping",
+                    instr.epic, NEWS_BLOCK_WINDOW_MIN)
+        return None
+
     try:
         candles = feed.get_candles()
         h1 = candles.get(TF_H1, [])
+        h4 = candles.get(TF_H4, [])
+
         if not h1:
             logger.debug("%s: no H1 candles returned", instr.epic)
             return None
+
+        # Gate 4 — ADX: suppress signals in choppy/ranging H4 conditions
+        if h4:
+            adx_vals = _adx(h4, period=14)
+            valid_adx = [v for v in adx_vals if not math.isnan(v)]
+            if valid_adx:
+                last_adx = valid_adx[-1]
+                if last_adx < ADX_TRENDING_THRESHOLD:
+                    logger.info("%s: ADX %.1f < %d — choppy market, skipping",
+                                instr.epic, last_adx, ADX_TRENDING_THRESHOLD)
+                    return None
+                logger.debug("%s: ADX %.1f — trending, proceeding", instr.epic, last_adx)
+
+        # Gate 5 — Strategy signal
         sig = strategy.evaluate(candles)
         if sig is None:
             logger.debug("%s: no signal", instr.epic)
             return None
+
+        # Gate 6 — S/R confluence: entry should be near a significant level
+        if h4 and h1:
+            atr_series = _atr(h1, period=14)
+            valid_atr  = [v for v in atr_series if v == v]
+            if valid_atr:
+                current_atr = valid_atr[-1]
+                entry       = h1[-1].close
+                levels      = key_levels(h4, h1)
+                if not near_key_level(entry, levels, current_atr, SR_CONFLUENCE_ATR_MULT):
+                    nearest = min(levels, key=lambda lv: abs(entry - lv)) if levels else None
+                    dist    = abs(entry - nearest) if nearest is not None else float("inf")
+                    logger.info(
+                        "%s: entry %.2f not near key level "
+                        "(nearest %.2f, dist %.1f vs threshold %.1f) — skipping",
+                        instr.epic, entry,
+                        nearest or 0, dist, SR_CONFLUENCE_ATR_MULT * current_atr,
+                    )
+                    return None
+
         return candles, sig.direction
     except Exception as exc:
         logger.error("%s: evaluation error: %s", instr.epic, exc)
