@@ -26,10 +26,13 @@ Quality gates on the sweep candle:
   wick_depth   ≥ min_wick_atr  × ATR  — real pierce, not a 1-point touch
   close_margin ≥ min_close_atr × ATR  — strong rejection, not a drift back
 """
+import logging
 from typing import Optional, Sequence
 
 from strategy.base import Candle
 from strategy.indicators import atr as _atr, swing_highs, swing_lows
+
+logger = logging.getLogger(__name__)
 
 
 class LiquiditySweepDetector:
@@ -71,12 +74,14 @@ class LiquiditySweepDetector:
         Iterates newest-to-oldest so the most recent confirmed setup is returned.
         """
         if len(candles) < self.min_candles:
+            logger.info("sweep diag: not enough candles (%d < %d)", len(candles), self.min_candles)
             return None
 
         # ATR-based quality thresholds (v == v strips NaN)
         atr_vals  = _atr(candles, self.atr_period)
         valid_atr = [v for v in atr_vals if v == v]
         if not valid_atr:
+            logger.info("sweep diag: ATR unavailable")
             return None
         current_atr = valid_atr[-1]
         min_wick    = self.min_wick_atr  * current_atr
@@ -97,12 +102,24 @@ class LiquiditySweepDetector:
         # the BOS must occur after the sweep, so sweep can't be bar[-1]).
         sweep_start = max(0, n - 1 - self.sweep_search)
 
+        # Per-leg diagnostics: count where each candidate sweep died so the logs
+        # reveal whether the gate is starved by missing pivots, weak sweeps, or
+        # an unconfirmed BOS — rather than a single opaque "no sweep" message.
+        diag = {
+            "no_prior_pivot": 0,   # no swing level to sweep before this bar
+            "weak_sweep":     0,   # wick/close did not meet ATR quality threshold
+            "valid_sweep":    0,   # sweep candle qualified
+            "no_bos_pivot":   0,   # sweep ok but no opposite pivot for a BOS level
+            "bos_unconfirmed": 0,  # BOS level exists but no later close broke it
+        }
+
         # ── BUY: sweep of swing low + break above swing high ──────────────────
         for sweep_idx in range(n - 2, sweep_start - 1, -1):
             bar = window[sweep_idx]
 
             prior_lows = [(i, v) for i, v in low_pivots if i < sweep_idx]
             if not prior_lows:
+                diag["no_prior_pivot"] += 1
                 continue
             _, sweep_level = prior_lows[-1]          # most recent swing low before this bar
 
@@ -110,17 +127,22 @@ class LiquiditySweepDetector:
             close_above = bar.close - sweep_level     # how far the close recovered above
 
             if wick_depth < min_wick or close_above < min_close:
+                diag["weak_sweep"] += 1
                 continue                              # sweep too weak — skip
+
+            diag["valid_sweep"] += 1
 
             # Sweep is valid. Find the BOS reference level.
             prior_highs = [(i, v) for i, v in high_pivots if i < sweep_idx]
             if not prior_highs:
+                diag["no_bos_pivot"] += 1
                 continue
             _, bos_level = prior_highs[-1]            # most recent swing high before sweep
 
             # BOS confirmed if any bar after the sweep closes above bos_level
             if any(window[j].close > bos_level for j in range(sweep_idx + 1, n)):
                 return "buy"
+            diag["bos_unconfirmed"] += 1
 
         # ── SELL: sweep of swing high + break below swing low ─────────────────
         for sweep_idx in range(n - 2, sweep_start - 1, -1):
@@ -128,6 +150,7 @@ class LiquiditySweepDetector:
 
             prior_highs = [(i, v) for i, v in high_pivots if i < sweep_idx]
             if not prior_highs:
+                diag["no_prior_pivot"] += 1
                 continue
             _, sweep_level = prior_highs[-1]
 
@@ -135,14 +158,30 @@ class LiquiditySweepDetector:
             close_below = sweep_level - bar.close
 
             if wick_height < min_wick or close_below < min_close:
+                diag["weak_sweep"] += 1
                 continue
+
+            diag["valid_sweep"] += 1
 
             prior_lows = [(i, v) for i, v in low_pivots if i < sweep_idx]
             if not prior_lows:
+                diag["no_bos_pivot"] += 1
                 continue
             _, bos_level = prior_lows[-1]
 
             if any(window[j].close < bos_level for j in range(sweep_idx + 1, n)):
                 return "sell"
+            diag["bos_unconfirmed"] += 1
 
+        # No setup. Log why, with the structural context, so the live logs pinpoint
+        # the failing leg instead of a generic skip.
+        logger.info(
+            "sweep diag: NO SETUP | window=%d bars | swing_highs=%d swing_lows=%d | "
+            "atr=%.4f min_wick=%.4f | candidates: no_prior_pivot=%d weak_sweep=%d "
+            "valid_sweep=%d no_bos_pivot=%d bos_unconfirmed=%d",
+            n, len(high_pivots), len(low_pivots),
+            current_atr, min_wick,
+            diag["no_prior_pivot"], diag["weak_sweep"], diag["valid_sweep"],
+            diag["no_bos_pivot"], diag["bos_unconfirmed"],
+        )
         return None
