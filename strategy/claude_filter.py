@@ -23,9 +23,22 @@ _MAX_TOKENS = 1024  # adaptive thinking needs headroom; text reply is still one 
 _CONTEXT_BARS = 20
 
 _SYSTEM = (
-    "You are a disciplined XAU/USD (gold spot) risk analyst. "
-    "You receive a proposed trade signal with supporting price context. "
-    "Your sole job is to decide whether the setup is sound. "
+    "You are a disciplined risk analyst reviewing liquidity-sweep reversal "
+    "signals on Gold, S&P 500, Nasdaq, and Dow Jones. "
+    "\n\n"
+    "IMPORTANT — how this strategy works: each signal is a LIQUIDITY SWEEP, "
+    "a deliberate counter-trend reversal setup. A 'sell' fires after price "
+    "spiked above a recent swing high and was rejected (closed back below) — "
+    "so price being ABOVE the EMA in an uptrend is EXPECTED and is NOT a "
+    "reason to reject. A 'buy' fires after price pierced a swing low and "
+    "snapped back up. Do NOT reject a signal merely for being counter-trend; "
+    "that is the entire point of the setup. "
+    "\n\n"
+    "Your job is to judge the QUALITY of the sweep: reject only if the price "
+    "action looks like a genuine breakout with no rejection, if volatility is "
+    "so extreme the setup is noise, or if recent closes show the reversal has "
+    "clearly already failed. When in doubt on a clean sweep, ACCEPT. "
+    "\n\n"
     "Reply with exactly one word — ACCEPT or REJECT — and nothing else."
 )
 
@@ -100,7 +113,7 @@ def _build_prompt(signal: Signal, candles: Sequence[Candle]) -> str:
     tail = list(candles[-_CONTEXT_BARS:]) if candles else []
     if not tail:
         return (
-            f"Proposed signal: {signal.direction.upper()} {signal.lots:.2f} lots XAUUSD\n"
+            f"Liquidity-sweep {signal.direction.upper()} reversal signal.\n"
             "No price history available.\n"
             "ACCEPT or REJECT?"
         )
@@ -122,12 +135,18 @@ def _build_prompt(signal: Signal, candles: Sequence[Candle]) -> str:
 
     recent_closes = ", ".join(f"{c.close:.2f}" for c in tail[-5:])
 
+    sweep_desc = (
+        "price swept above a swing high and was rejected (bearish reversal)"
+        if signal.direction == "sell"
+        else "price swept below a swing low and snapped back up (bullish reversal)"
+    )
     return (
-        f"Proposed signal: {signal.direction.upper()} {signal.lots:.2f} lots XAUUSD\n"
+        f"Liquidity-sweep {signal.direction.upper()} reversal signal "
+        f"({sweep_desc}).\n"
         f"Current price : {last.close:.2f}\n"
         f"EMA-20        : {ema_str} (price is {trend_rel} EMA-20)\n"
         f"ATR-14 avg    : {avg_atr:.2f}\n"
         f"Last 5 closes : {recent_closes}\n"
         f"Last bar H/L  : {last.high:.2f} / {last.low:.2f}\n"
-        f"\nACCEPT or REJECT?"
+        f"\nJudge the quality of this sweep. ACCEPT or REJECT?"
     )

@@ -1,10 +1,14 @@
 """
-GoldStrategy — top-level strategy for XAU/USD.
-Chains: H4 regime filter → H1 liquidity sweep → alignment check → ML filter.
+GoldStrategy — top-level liquidity-sweep strategy.
+
+Despite the name (kept for backward compatibility), this strategy is
+instrument-agnostic and is applied to every market in the watchlist:
+Gold (XAU/USD), S&P 500, Nasdaq 100, and Dow Jones.
+
+Chains: H4 regime filter → H1 liquidity sweep → Claude/ML signal filter.
 Outputs a Signal or None. Never touches the broker or any core module.
 """
 import logging
-import os
 from typing import Optional
 
 from execution.models import Signal
@@ -17,13 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _default_signal_filter() -> SignalFilter:
-    """Use ClaudeSignalFilter when ANTHROPIC_API_KEY is present, else passthrough."""
-    if os.getenv("ANTHROPIC_API_KEY"):
-        from strategy.claude_filter import ClaudeSignalFilter
-        logger.info("ClaudeSignalFilter active (claude-opus-4-8)")
-        return ClaudeSignalFilter()
-    logger.info("MLSignalFilter active (passthrough — set ANTHROPIC_API_KEY to enable Claude)")
-    return MLSignalFilter()
+    return MLSignalFilter()  # passthrough — Gate 2 + Gate 3 are sufficient filters
 
 
 class GoldStrategy(StrategyBase):
@@ -65,16 +63,9 @@ class GoldStrategy(StrategyBase):
             return None
         logger.info("gate3 PASS: sweep direction=%s", direction)
 
-        # ── Gate 4: regime-direction alignment ────────────────────────────────
-        if regime == MarketRegime.TRENDING_UP and direction != "buy":
-            logger.info("gate4 SKIP: sweep %s misaligns with TRENDING_UP", direction)
-            return None
-        if regime == MarketRegime.TRENDING_DOWN and direction != "sell":
-            logger.info("gate4 SKIP: sweep %s misaligns with TRENDING_DOWN", direction)
-            return None
-        logger.info("gate4 PASS: direction aligned with regime")
-
-        # ── Gate 5: ML / Claude filter ────────────────────────────────────────
+        # ── Gate 4: signal filter (Claude / ML) ───────────────────────────────
+        # Regime-direction alignment removed: liquidity sweeps are reversal
+        # signals by design, so the sweep direction stands on its own.
         candidate = Signal(direction=direction, lots=self.lots)
         if not self.signal_filter.accept(candidate, h1):
             logger.info("gate5 SKIP: signal filter rejected")

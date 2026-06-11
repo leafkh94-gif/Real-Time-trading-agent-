@@ -1,13 +1,34 @@
-name: Gold Alert Bot
+name: Trading Alert Bot
+
+# Reliable 24/7 coverage on a PUBLIC repo (unlimited free Actions minutes).
+#
+# How it works:
+#   * Each run executes main_alerts.py for ~5h40m then exits cleanly.
+#   * At the end of each run a "self-chain" step triggers the next run via
+#     the GitHub API — guaranteed handoff with no gap, no cron scheduler needed.
+#   * The schedule cron is a recovery-only watchdog: if the chain ever dies for
+#     any reason, the next tick (worst-case ~60 min) restarts it automatically.
+#   * concurrency group prevents duplicate runners if cron and self-chain overlap.
 
 on:
+  workflow_dispatch:        # manual start / restart from the Actions tab
   schedule:
-    - cron: '*/15 * * * *'  # every 15 minutes
-  workflow_dispatch:          # allow manual trigger from GitHub UI
+    - cron: '0 * * * *'    # recovery watchdog: hourly (cron is unreliable; self-chain is primary)
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # suppress Node.js 20 deprecation warnings
+
+permissions:
+  actions: write   # required for self-chain workflow_dispatch trigger
+
+concurrency:
+  group: trading-bot
+  cancel-in-progress: false  # never kill the live run; let the new one queue
 
 jobs:
-  scan:
+  run:
     runs-on: ubuntu-latest
+    timeout-minutes: 355     # hard ceiling; main_alerts exits before this via MAX_RUNTIME_S
 
     steps:
       - name: Checkout code
@@ -20,13 +41,32 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-alerts.txt
 
-      - name: Run market scan
-        run: python scan_once.py
+      - name: Restore cooldown state
+        uses: actions/cache@v4
+        with:
+          path: .alert_cooldown.json
+          key: cooldown-${{ github.run_id }}
+          restore-keys: |
+            cooldown-
+
+      - name: Run alert bot (continuous, ~5h40m then clean handoff)
+        run: python main_alerts.py
         env:
-          TELEGRAM_BOT_TOKEN:     ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:       ${{ secrets.TELEGRAM_CHAT_ID }}
-          ANTHROPIC_API_KEY:      ${{ secrets.ANTHROPIC_API_KEY }}
-          ALPHAVANTAGE_API_KEY:   ${{ secrets.ALPHAVANTAGE_API_KEY }}
-          ENVIRONMENT:            development
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+          ENVIRONMENT:        development
+          MAX_RUNTIME_S:      '20400'   # 340 min = 5h40m
+          PORT:               '8080'
+
+      - name: Self-chain — queue the next run immediately
+        if: always()
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/alert_bot.yml/dispatches" \
+            -d '{"ref":"main"}'
+          echo "Next run queued."
