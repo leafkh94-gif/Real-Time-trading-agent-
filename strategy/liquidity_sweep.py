@@ -38,9 +38,9 @@ class LiquiditySweepDetector:
         lookback: int = 20,
         sweep_lookback: int = 3,
         atr_period: int = 14,
-        min_wick_atr: float = 0.2,
-        min_close_atr: float = 0.2,
-        sweep_search: int = 6,
+        min_wick_atr: float = 0.05,
+        min_close_atr: float = 0.05,
+        sweep_search: int = 14,
     ):
         """
         lookback:       candles used for the swing pivot detection window.
