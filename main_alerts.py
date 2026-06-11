@@ -31,10 +31,12 @@ load_dotenv()
 
 from alerts.notifier import NullNotifier, TelegramNotifier
 from core.log_sanitizer import setup_logging
+from execution.models import Signal
 from strategy.base import TF_H1, TF_H4
 from strategy.gold_strategy import GoldStrategy
 from strategy.indicators import atr as _atr, ema as _ema, swing_highs, swing_lows
 from strategy.market_hours import is_tradeable
+from strategy.momentum_detector import MomentumDetector
 from strategy.news_filter import high_impact_news_within
 from strategy.yahoo_feed import YahooFinanceFeed
 
@@ -200,18 +202,21 @@ def _nearest_swing_tp(h1: list, entry: float, direction: str) -> float | None:
 # ── Per-instrument scan ───────────────────────────────────────────────────────
 
 def _evaluate_one(instr: _Instrument, feed: YahooFinanceFeed,
-                  strategy: GoldStrategy, logger: logging.Logger):
+                  strategy: GoldStrategy, logger: logging.Logger,
+                  momentum_detector: MomentumDetector | None = None):
     """
     Fetch candles and run the full filter pipeline.
     Returns (candles, direction, swing_tp) if all gates pass, else None.
 
     Gate order (cheapest first):
-      1. Cooldown     — skip if alerted in the last 4 hours
-      2. Market hours — skip outside trading session
-      3. News window  — skip ±30 min around high-impact USD events
-      4. Strategy     — sweep (wick quality) + BOS / CHOCH confirmation + EMA regime
-      5. EMA distance — suppress counter-trend signals in rocket-trend markets
-      6. R:R          — skip if nearest swing target gives less than 1:2
+      1. Cooldown        — skip if alerted in the last 4 hours
+      2. Market hours    — skip outside trading session
+      3. News window     — skip ±30 min around high-impact USD events
+      4a. Strategy       — sweep (wick quality) + BOS / CHOCH confirmation + EMA regime
+      4b. Momentum       — fallback: big ATR-sized move fires counter-trend signal
+      5. EMA distance    — suppress counter-trend signals in rocket-trend markets
+                           (skipped for momentum signals — they ARE the counter-trend)
+      6. R:R             — skip if nearest swing target gives less than 1:2
     """
     if instr.on_cooldown():
         logger.debug("%s: cooldown active — skipping", instr.epic)
@@ -235,14 +240,26 @@ def _evaluate_one(instr: _Instrument, feed: YahooFinanceFeed,
             logger.debug("%s: no H1 candles returned", instr.epic)
             return None
 
-        # Gate 4 — Strategy: sweep + BOS + EMA regime filter (inside GoldStrategy)
+        # Gate 4a — Strategy: sweep + BOS + EMA regime filter (inside GoldStrategy)
         sig = strategy.evaluate(candles)
+        is_momentum_signal = False
+
+        # Gate 4b — Momentum fallback: big ATR-sized directional move
+        if sig is None and momentum_detector is not None and h1:
+            direction = momentum_detector.detect(h1)
+            if direction is not None:
+                sig = Signal(direction=direction, lots=strategy.lots, symbol=instr.epic)
+                is_momentum_signal = True
+                logger.info("%s: momentum signal → %s", instr.epic, direction.upper())
+
         if sig is None:
             logger.debug("%s: no signal", instr.epic)
             return None
 
-        # Gate 5 — EMA trend strength: suppress counter-trend in rocket markets
-        if h4:
+        # Gate 5 — EMA trend strength: suppress counter-trend in rocket markets.
+        # Skipped for momentum signals — they are intentionally counter-trend
+        # (big up move → SELL, big down move → BUY).
+        if not is_momentum_signal and h4:
             closes = [c.close for c in h4]
             e20 = _ema(closes, 20)
             e50 = _ema(closes, 50)
@@ -380,7 +397,8 @@ def main() -> None:
             f"Alert bot started {_startup_time}. Watching Gold, S&P 500, Nasdaq, Dow. Scanning every 30 min.")
     logger.info("Startup notification sent")
 
-    strategy  = GoldStrategy()
+    strategy           = GoldStrategy()
+    momentum_detector  = MomentumDetector()   # fires SELL on big up, BUY on big down
     epic_list = ", ".join(i.epic for i in WATCHLIST)
 
     # Optional bounded runtime (used by the cloud runner so each job exits
@@ -398,7 +416,7 @@ def main() -> None:
         for instr in WATCHLIST:
             if not _running:
                 break
-            result = _evaluate_one(instr, feeds[instr.epic], strategy, logger)
+            result = _evaluate_one(instr, feeds[instr.epic], strategy, logger, momentum_detector)
             if result is not None:
                 candles, direction, swing_tp = result
                 pending[instr.epic] = (instr, candles, direction, swing_tp)
