@@ -15,7 +15,7 @@ class RegimeFilter:
         atr_period: int = 14,
         ema_fast: int = 20,
         ema_slow: int = 50,
-        volatile_atr_pct: float = 0.030,
+        volatile_atr_pct: float = 0.018,
     ):
         """
         volatile_atr_pct: if ATR / close > this fraction → VOLATILE (avoid trading).
