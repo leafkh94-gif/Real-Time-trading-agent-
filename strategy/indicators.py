@@ -77,6 +77,71 @@ def swing_lows(candles: Sequence[Candle], lookback: int = 5) -> list[float | Non
     return result
 
 
+def rsi(prices: Sequence[float], period: int = 14) -> list[float]:
+    """
+    RSI using Wilder's smoothing. Returns a same-length list; leading entries
+    are NaN until enough bars exist (period + 1 prices needed for first value).
+    """
+    n = len(prices)
+    if n < period + 1:
+        return [float("nan")] * n
+
+    result = [float("nan")] * n
+    gains  = [max(prices[i] - prices[i - 1], 0.0) for i in range(1, n)]
+    losses = [max(prices[i - 1] - prices[i], 0.0) for i in range(1, n)]
+
+    ag = sum(gains[:period]) / period
+    al = sum(losses[:period]) / period
+    rs = ag / al if al > 0 else float("inf")
+    result[period] = 100.0 - 100.0 / (1.0 + rs)
+
+    for i in range(period, n - 1):
+        ag = (ag * (period - 1) + gains[i]) / period
+        al = (al * (period - 1) + losses[i]) / period
+        rs = ag / al if al > 0 else float("inf")
+        result[i + 1] = 100.0 - 100.0 / (1.0 + rs)
+
+    return result
+
+
+def macd(
+    prices: Sequence[float],
+    fast: int = 12,
+    slow: int = 26,
+    signal_period: int = 9,
+) -> tuple[list[float], list[float], list[float]]:
+    """
+    MACD (12/26/9 default). Returns (macd_line, signal_line, histogram).
+    All three lists are index-aligned to prices; leading entries are NaN.
+    """
+    fast_ema = ema(prices, fast)
+    slow_ema = ema(prices, slow)
+    n = len(prices)
+
+    macd_line = [
+        fast_ema[i] - slow_ema[i]
+        if not (math.isnan(fast_ema[i]) or math.isnan(slow_ema[i]))
+        else float("nan")
+        for i in range(n)
+    ]
+
+    first_ok = next((i for i, v in enumerate(macd_line) if not math.isnan(v)), None)
+    if first_ok is None or (n - first_ok) < signal_period:
+        nan_list = [float("nan")] * n
+        return macd_line, nan_list, nan_list
+
+    signal_raw  = ema(macd_line[first_ok:], signal_period)
+    signal_line = [float("nan")] * first_ok + signal_raw
+
+    histogram = [
+        macd_line[i] - signal_line[i]
+        if not (math.isnan(macd_line[i]) or math.isnan(signal_line[i]))
+        else float("nan")
+        for i in range(n)
+    ]
+    return macd_line, signal_line, histogram
+
+
 def adx(candles: Sequence[Candle], period: int = 14) -> list[float]:
     """
     Average Directional Index (Wilder, 14-period default).

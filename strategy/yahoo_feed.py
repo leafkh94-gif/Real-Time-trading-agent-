@@ -6,7 +6,7 @@ No account, no password, no API key required.
 import logging
 import time
 import random
-from strategy.base import Candle, MultiTimeframeCandles, TF_H1, TF_H4
+from strategy.base import Candle, MultiTimeframeCandles, TF_D1, TF_H1, TF_H4
 from strategy.feed import PriceFeed
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ class YahooFinanceFeed(PriceFeed):
 
         if df is None or df.empty:
             logger.error("YahooFinanceFeed: all attempts failed for %s", self._ticker)
-            return {TF_H4: [], TF_H1: []}
+            return {TF_D1: [], TF_H4: [], TF_H1: []}
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -70,9 +70,33 @@ class YahooFinanceFeed(PriceFeed):
             .dropna(subset=["Open", "Close"])
         )
         h4 = self._to_candles(df_h4)
-        logger.debug("YahooFinanceFeed %s: %d H1 candles, %d H4 candles",
-                     self._epic, len(h1), len(h4))
-        return {TF_H4: h4, TF_H1: h1}
+        d1 = self._fetch_daily()
+        logger.debug("YahooFinanceFeed %s: %d H1, %d H4, %d D1 candles",
+                     self._epic, len(h1), len(h4), len(d1))
+        return {TF_D1: d1, TF_H4: h4, TF_H1: h1}
+
+    def _fetch_daily(self) -> list[Candle]:
+        """Fetch 1 year of daily candles for multi-timeframe trend analysis."""
+        import yfinance as yf
+        import pandas as pd
+        try:
+            time.sleep(random.uniform(1, 3))
+            df = yf.download(
+                self._ticker,
+                period="1y",
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                actions=False,
+            )
+            if df is None or df.empty:
+                return []
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            return self._to_candles(df)
+        except Exception as exc:
+            logger.warning("YahooFinanceFeed: D1 fetch failed for %s: %s", self._ticker, exc)
+            return []
 
     @staticmethod
     def _to_candles(df) -> list[Candle]:

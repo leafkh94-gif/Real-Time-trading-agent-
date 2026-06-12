@@ -28,8 +28,9 @@ class MarketRegime(str, Enum):
 
 
 # Timeframe labels used as dict keys throughout the strategy layer
-TF_H4 = "H4"
-TF_H1 = "H1"
+TF_D1  = "D1"
+TF_H4  = "H4"
+TF_H1  = "H1"
 TF_M15 = "M15"
 
 MultiTimeframeCandles = dict[str, list[Candle]]
