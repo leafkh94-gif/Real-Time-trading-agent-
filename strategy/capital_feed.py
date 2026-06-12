@@ -8,6 +8,7 @@ creation to 1 per second, so per-instrument logins trigger 429 errors.
 The first instance logs in; the rest reuse the same CST/security tokens.
 """
 import logging
+import random
 import threading
 import time
 
@@ -102,9 +103,9 @@ class CapitalComFeed(PriceFeed):
                 raise                      # bad credentials — retrying won't help
             except Exception as exc:       # 429 / network — back off and retry
                 last_exc = exc
-                wait = 2 * attempt
+                wait = min(60, 2 ** attempt) + random.uniform(0, 2)
                 logger.warning(
-                    "CapitalComFeed: login attempt %d failed (%s) — retrying in %ds",
+                    "CapitalComFeed: login attempt %d failed (%s) — retrying in %.1fs",
                     attempt, exc, wait,
                 )
                 time.sleep(wait)
