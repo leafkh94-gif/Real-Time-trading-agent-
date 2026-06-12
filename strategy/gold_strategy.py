@@ -1,12 +1,13 @@
 """
-GoldStrategy — top-level liquidity-sweep strategy.
+Alert strategy — liquidity sweep across US indices.
 
-Despite the name (kept for backward compatibility), this strategy is
-instrument-agnostic and is applied to every market in the watchlist:
-Gold (XAU/USD), S&P 500, Nasdaq 100, and Dow Jones.
+Chains three gates in sequence:
+  Gate 1 — Data sufficiency  (H4 ≥ 65 candles, H1 ≥ 28 candles)
+  Gate 2 — Regime filter     (H4 ATR/close > 1.8% → VOLATILE → skip)
+  Gate 3 — Liquidity sweep   (H1 wick pierces swing level + closes back)
 
-Chains: H4 regime filter → H1 liquidity sweep → Claude/ML signal filter.
-Outputs a Signal or None. Never touches the broker or any core module.
+Returns a Signal (direction + lots) or None.
+Never touches the broker or any execution layer.
 """
 import logging
 from typing import Optional
@@ -15,13 +16,8 @@ from execution.models import Signal
 from strategy.base import MarketRegime, MultiTimeframeCandles, StrategyBase, TF_H1, TF_H4
 from strategy.liquidity_sweep import LiquiditySweepDetector
 from strategy.regime_filter import RegimeFilter
-from strategy.signal_filter import MLSignalFilter, SignalFilter
 
 logger = logging.getLogger(__name__)
-
-
-def _default_signal_filter() -> SignalFilter:
-    return MLSignalFilter()  # passthrough — Gate 2 + Gate 3 are sufficient filters
 
 
 class GoldStrategy(StrategyBase):
@@ -30,12 +26,10 @@ class GoldStrategy(StrategyBase):
         lots: float = 0.05,
         regime_filter: RegimeFilter | None = None,
         sweep_detector: LiquiditySweepDetector | None = None,
-        signal_filter: SignalFilter | None = None,
     ):
         self.lots = lots
-        self.regime_filter = regime_filter or RegimeFilter()
+        self.regime_filter  = regime_filter  or RegimeFilter()
         self.sweep_detector = sweep_detector or LiquiditySweepDetector()
-        self.signal_filter = signal_filter or _default_signal_filter()
 
     def evaluate(self, candles: MultiTimeframeCandles) -> Optional[Signal]:
         h4 = candles.get(TF_H4, [])
@@ -53,7 +47,7 @@ class GoldStrategy(StrategyBase):
         regime = self.regime_filter.classify(h4)
         logger.info("gate2: regime=%s", regime.value)
         if regime == MarketRegime.VOLATILE:
-            logger.info("gate2 SKIP: regime VOLATILE")
+            logger.info("gate2 SKIP: regime VOLATILE (ATR/close > 1.8%%)")
             return None
 
         # ── Gate 3: liquidity sweep (H1) ─────────────────────────────────────
@@ -61,15 +55,6 @@ class GoldStrategy(StrategyBase):
         if direction is None:
             logger.info("gate3 SKIP: no liquidity sweep detected")
             return None
-        logger.info("gate3 PASS: sweep direction=%s", direction)
+        logger.info("gate3 PASS: sweep direction=%s  regime=%s", direction, regime.value)
 
-        # ── Gate 4: signal filter (Claude / ML) ───────────────────────────────
-        # Regime-direction alignment removed: liquidity sweeps are reversal
-        # signals by design, so the sweep direction stands on its own.
-        candidate = Signal(direction=direction, lots=self.lots)
-        if not self.signal_filter.accept(candidate, h1):
-            logger.info("gate5 SKIP: signal filter rejected")
-            return None
-
-        logger.info("signal generated: %s %.2f lots (regime=%s)", direction, self.lots, regime.value)
-        return candidate
+        return Signal(direction=direction, lots=self.lots)
