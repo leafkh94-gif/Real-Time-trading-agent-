@@ -2,6 +2,10 @@
 Capital.com live price feed.
 Fetches real OHLC candles for any instrument via Capital.com REST API.
 Used by main_alerts.py to watch multiple markets in real time.
+
+All feed instances share ONE session: Capital.com rate-limits session
+creation to 1 per second, so per-instrument logins trigger 429 errors.
+The first instance logs in; the rest reuse the same CST/security tokens.
 """
 import logging
 import threading
@@ -18,13 +22,21 @@ _DEMO_BASE = "https://demo-api-capital.backend-capital.com/api/v1"
 _LIVE_BASE = "https://api-capital.backend-capital.com/api/v1"
 _PING_INTERVAL = 8 * 60
 _TIMEOUT = 15
+_LOGIN_RETRIES = 5
 
 
 class CapitalComFeed(PriceFeed):
     """
     Fetches H4 + H1 candles for a given Capital.com epic (e.g. GOLD, US500).
-    Handles session auth and auto-reauth on 401.
+    Handles session auth and auto-reauth on 401. The session (CST + security
+    token) is shared across all instances — they all use the same account.
     """
+
+    # Shared session state — class-level, guarded by _session_lock
+    _cst: str = ""
+    _security_token: str = ""
+    _session_lock = threading.Lock()
+    _keepalive_started = False
 
     def __init__(self, api_key: str, identifier: str, password: str,
                  epic: str = "GOLD", demo: bool = True):
@@ -33,9 +45,6 @@ class CapitalComFeed(PriceFeed):
         self._password = password
         self._epic = epic
         self._base = _DEMO_BASE if demo else _LIVE_BASE
-        self._cst = ""
-        self._security_token = ""
-        self._lock = threading.Lock()
         self._connect()
 
     # ── PriceFeed interface ───────────────────────────────────────────────────
@@ -49,23 +58,67 @@ class CapitalComFeed(PriceFeed):
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _connect(self) -> None:
-        self._login()
-        t = threading.Thread(target=self._keepalive, daemon=True, name=f"feed-{self._epic}")
-        t.start()
-        logger.info("CapitalComFeed: connected (epic=%s)", self._epic)
+        cls = CapitalComFeed
+        with cls._session_lock:
+            if not cls._cst:
+                self._login_locked()
+            if not cls._keepalive_started:
+                cls._keepalive_started = True
+                t = threading.Thread(target=self._keepalive, daemon=True,
+                                     name="capital-keepalive")
+                t.start()
+        logger.info("CapitalComFeed: ready (epic=%s, shared session)", self._epic)
 
-    def _login(self) -> None:
-        r = _req.post(
-            f"{self._base}/session",
-            headers={"X-CAP-API-KEY": self._api_key, "Content-Type": "application/json"},
-            json={"identifier": self._identifier, "password": self._password,
-                  "encryptedPassword": False},
-            timeout=_TIMEOUT,
+    def _login_locked(self) -> None:
+        """
+        Create a session. Caller must hold _session_lock.
+        Retries with backoff on 429 (session creation is limited to 1/s) and
+        transient network errors; fails fast on bad credentials (400/401/403).
+        """
+        cls = CapitalComFeed
+        last_exc: Exception | None = None
+        for attempt in range(1, _LOGIN_RETRIES + 1):
+            try:
+                r = _req.post(
+                    f"{self._base}/session",
+                    headers={"X-CAP-API-KEY": self._api_key,
+                             "Content-Type": "application/json"},
+                    json={"identifier": self._identifier,
+                          "password": self._password,
+                          "encryptedPassword": False},
+                    timeout=_TIMEOUT,
+                )
+                if r.status_code in (400, 401, 403):
+                    raise RuntimeError(
+                        f"Capital.com rejected the credentials "
+                        f"(HTTP {r.status_code}): {r.text[:200]}"
+                    )
+                r.raise_for_status()
+                cls._cst = r.headers["CST"]
+                cls._security_token = r.headers["X-SECURITY-TOKEN"]
+                logger.info("CapitalComFeed: session created (attempt %d)", attempt)
+                return
+            except RuntimeError:
+                raise                      # bad credentials — retrying won't help
+            except Exception as exc:       # 429 / network — back off and retry
+                last_exc = exc
+                wait = 2 * attempt
+                logger.warning(
+                    "CapitalComFeed: login attempt %d failed (%s) — retrying in %ds",
+                    attempt, exc, wait,
+                )
+                time.sleep(wait)
+        raise RuntimeError(
+            f"Capital.com login failed after {_LOGIN_RETRIES} attempts: {last_exc}"
         )
-        r.raise_for_status()
-        with self._lock:
-            self._cst = r.headers["CST"]
-            self._security_token = r.headers["X-SECURITY-TOKEN"]
+
+    def _reauth(self, stale_cst: str) -> None:
+        """Re-login once when a request 401s. The stale-token check stops
+        several instruments from stampeding the session endpoint at once."""
+        cls = CapitalComFeed
+        with cls._session_lock:
+            if cls._cst == stale_cst:      # nobody re-logged-in yet
+                self._login_locked()
 
     def _keepalive(self) -> None:
         while True:
@@ -76,15 +129,17 @@ class CapitalComFeed(PriceFeed):
                 logger.warning("CapitalComFeed keepalive failed: %s", exc)
 
     def _auth_headers(self) -> dict:
-        with self._lock:
-            return {"CST": self._cst, "X-SECURITY-TOKEN": self._security_token,
+        cls = CapitalComFeed
+        with cls._session_lock:
+            return {"CST": cls._cst, "X-SECURITY-TOKEN": cls._security_token,
                     "Content-Type": "application/json"}
 
     def _request(self, method: str, path: str, **kwargs) -> _req.Response:
+        headers = self._auth_headers()
         r = _req.request(method, f"{self._base}{path}",
-                         headers=self._auth_headers(), timeout=_TIMEOUT, **kwargs)
+                         headers=headers, timeout=_TIMEOUT, **kwargs)
         if r.status_code == 401:
-            self._login()
+            self._reauth(headers["CST"])
             r = _req.request(method, f"{self._base}{path}",
                              headers=self._auth_headers(), timeout=_TIMEOUT, **kwargs)
         r.raise_for_status()
