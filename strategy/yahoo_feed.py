@@ -12,7 +12,6 @@ from strategy.feed import PriceFeed
 logger = logging.getLogger(__name__)
 
 TICKER_MAP: dict[str, str] = {
-    "GOLD":  "GC=F",    # CME Gold futures — reliable H1 data, tracks spot within $5-20
     "US500": "^GSPC",
     "US100": "^NDX",
     "US30":  "^DJI",
