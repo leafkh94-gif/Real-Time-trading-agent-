@@ -16,6 +16,7 @@ class Signal:
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     comment: str = ""
+    confirmed: bool = False  # True = BOS confirmed; False = sweep only (setup forming)
 
     def __post_init__(self):
         if self.direction not in ("buy", "sell"):
