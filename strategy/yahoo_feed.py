@@ -12,12 +12,9 @@ from strategy.feed import PriceFeed
 logger = logging.getLogger(__name__)
 
 TICKER_MAP: dict[str, str] = {
-    # CME index futures — near-24h H1 data (Sun 18:00 → Fri 17:00 ET), so the
-    # bot has live candles overnight, unlike the cash indices (^GSPC etc) which
-    # only update during the 09:30-16:00 ET session.
-    "US500": "ES=F",    # E-mini S&P 500
-    "US100": "NQ=F",    # E-mini Nasdaq 100
-    "US30":  "YM=F",    # E-mini Dow
+    "US500": "^GSPC",
+    "US100": "^NDX",
+    "US30":  "^DJI",
 }
 
 
