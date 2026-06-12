@@ -15,12 +15,6 @@ on:
   schedule:
     - cron: '0 * * * *'    # recovery watchdog: hourly (cron is unreliable; self-chain is primary)
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true   # suppress Node.js 20 deprecation warnings
-
-permissions:
-  actions: write   # required for self-chain workflow_dispatch trigger
-
 concurrency:
   group: trading-bot
   cancel-in-progress: false  # never kill the live run; let the new one queue
