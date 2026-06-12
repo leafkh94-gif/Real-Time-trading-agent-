@@ -31,6 +31,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from datetime import datetime, time as dtime, timedelta
+from zoneinfo import ZoneInfo
+
 from alerts.notifier import NullNotifier, TelegramNotifier
 from core.log_sanitizer import setup_logging
 from strategy.base import TF_H1, TF_H4
@@ -113,7 +116,7 @@ def _build_message(instr: _Instrument, direction: str,
                    entry: float, tp: float, sl: float) -> tuple[str, str]:
     """Return (html, plain) alert strings."""
     import datetime
-    now       = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now       = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     emoji     = "🟢" if direction == "buy" else "🔴"
     dir_label = "BUY"  if direction == "buy" else "SELL"
     risk      = abs(entry - sl)
@@ -245,6 +248,59 @@ def _send_alert(instr: _Instrument, direction: str, entry: float,
         logger.error("%s: alert error: %s", instr.epic, exc)
 
 
+# ── Market-hours sleep ────────────────────────────────────────────────────────
+
+_ET = ZoneInfo("America/New_York")
+_MARKET_OPEN  = dtime(9, 30)
+_MARKET_CLOSE = dtime(15, 30)   # 30-min buffer before 16:00 close
+
+
+def _next_market_open_et() -> datetime:
+    """Return the next NYSE open as a tz-aware ET datetime."""
+    now = datetime.now(tz=_ET)
+    candidate = now.replace(hour=9, minute=30, second=0, microsecond=0)
+
+    # If we're already past the cutoff today, roll to next day
+    if now.time() >= _MARKET_CLOSE:
+        candidate += timedelta(days=1)
+
+    # Advance past weekends
+    while candidate.weekday() >= 5:   # 5=Sat, 6=Sun
+        candidate += timedelta(days=1)
+
+    return candidate
+
+
+def _wait_for_market_open(logger: logging.Logger) -> None:
+    """
+    If all markets are currently closed, sleep until the next NYSE open
+    (09:30 ET on the next trading day) rather than spinning every 20 min.
+    Wakes up 2 minutes early so the first scan fires right at open.
+    Respects MAX_RUNTIME_S — exits cleanly if runtime would be exceeded.
+    """
+    if is_tradeable("US500"):   # representative — all three share the same hours
+        return
+
+    next_open = _next_market_open_et()
+    wake_time = next_open - timedelta(minutes=2)
+    now       = datetime.now(tz=_ET)
+    wait_s    = (wake_time - now).total_seconds()
+
+    if wait_s <= 0:
+        return
+
+    logger.info(
+        "Markets closed — sleeping %.0f min until %s ET  (next NYSE open)",
+        wait_s / 60,
+        next_open.strftime("%H:%M"),
+    )
+
+    # Sleep in 60-second chunks so SIGTERM is handled promptly
+    deadline = time.time() + wait_s
+    while _running and time.time() < deadline:
+        time.sleep(min(60, deadline - time.time()))
+
+
 # ── Health server (keeps Render / cloud host alive) ────────────────────────────
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -293,7 +349,7 @@ def main() -> None:
     _load_cooldowns(WATCHLIST)
 
     import datetime as _dt
-    _startup_time = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    _startup_time = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     _notify(notifier,
             f"🟡 <b>Alert bot started</b> — <i>{_startup_time}</i>\n"
             "Watching S&amp;P 500, Nasdaq 100, Dow Jones. Scanning every 20 min.",
@@ -311,6 +367,8 @@ def main() -> None:
                 f", max runtime {max_runtime_s}s" if max_runtime_s else "")
 
     while _running:
+        _wait_for_market_open(logger)   # sleep until 09:30 ET if markets are closed
+
         for instr in WATCHLIST:
             if not _running:
                 break
