@@ -5,8 +5,8 @@ Three-gate pipeline:
   Gate 1 — Price confirms direction
             BUY:  close breaks above resistance OR strong bounce from support
             SELL: close breaks below support OR rejection from resistance
-  Gate 2 — ≥2 of 3 confirmation conditions
-            A. Indicators align  (RSI + MACD + MAs on H1)
+  Gate 2 — ≥1 of 3 confirmation conditions (loosened for more alerts)
+            A. Indicators align  (RSI direction + MACD on H1)
             B. Multi-timeframe   (D1 EMA20 vs EMA50 trend + H1 confirms)
             C. Active session    (London 03:00–12:00 ET or NY 09:30–16:00 ET)
   Gate 3 — R:R ≥ 1.5  (TP = 2.5×ATR, SL = 1.5×ATR → 1:1.67)
@@ -34,7 +34,9 @@ _NY_CLOSE     = time(16, 0)
 _MIN_H1     = 60       # minimum H1 candles required
 _MIN_D1     = 50       # minimum D1 candles for MTF condition
 _SR_WINDOW  = 60       # H1 bars scanned for swing support/resistance
-_WICK_RATIO = 0.4      # wick must be ≥40% of candle range for bounce/rejection
+_WICK_RATIO = 0.2      # wick must be ≥20% of candle range for bounce/rejection
+_LEVEL_TOL  = 0.0015   # near-level tolerance: within 0.15% of a level counts
+_MIN_CONDS  = 1        # Gate 2: only 1 of 3 confirmation conditions required
 _TP_MULT    = 2.5
 _SL_MULT    = 1.5
 _MIN_RR     = 1.5
@@ -87,15 +89,13 @@ class GoldStrategy(StrategyBase):
         # ── Gate 2: ≥2 of 3 confirmation conditions ───────────────────────────
         conds = 0
 
-        # Condition A — indicators align
+        # Condition A — indicators align (loosened: RSI direction + MACD only)
         if direction == "buy":
-            if cur_rsi > 50 and cur_rsi > prev_rsi and cur_macd > cur_sig \
-                    and cur_close > cur_ema20 and cur_close > cur_ema50:
+            if cur_rsi > prev_rsi and cur_macd > cur_sig:
                 conds += 1
                 logger.debug("gate2: A (indicators bullish) ✓")
         else:
-            if cur_rsi < 50 and cur_rsi < prev_rsi and cur_macd < cur_sig \
-                    and cur_close < cur_ema20 and cur_close < cur_ema50:
+            if cur_rsi < prev_rsi and cur_macd < cur_sig:
                 conds += 1
                 logger.debug("gate2: A (indicators bearish) ✓")
 
@@ -120,8 +120,8 @@ class GoldStrategy(StrategyBase):
             conds += 1
             logger.debug("gate2: C (active session) ✓")
 
-        if conds < 2:
-            logger.info("gate2 SKIP: only %d/3 conditions met (need ≥2)", conds)
+        if conds < _MIN_CONDS:
+            logger.info("gate2 SKIP: only %d/3 conditions met (need ≥%d)", conds, _MIN_CONDS)
             return None
 
         # ── Gate 3: R:R ≥ 1.5 ────────────────────────────────────────────────
@@ -154,24 +154,28 @@ class GoldStrategy(StrategyBase):
         lower_wick = min(bar.close, bar.open) - bar.low
         upper_wick = bar.high - max(bar.close, bar.open)
 
-        # BUY — close breaks above a resistance level
-        buy_breakout = any(prev.close <= r <= bar.close for r in resistances)
+        # BUY — close breaks above (or reaches within tolerance of) a resistance
+        buy_breakout = any(
+            prev.close < r and bar.close >= r * (1 - _LEVEL_TOL) for r in resistances
+        )
 
-        # BUY — strong bounce from support (wick dipped below, closed back above)
+        # BUY — bounce from support (wick reached down to/near support, closed above)
         buy_bounce = (
             bar_range > 0
             and lower_wick >= _WICK_RATIO * bar_range
-            and any(bar.low < s < bar.close for s in supports)
+            and any(bar.low <= s * (1 + _LEVEL_TOL) and bar.close > s for s in supports)
         )
 
-        # SELL — close breaks below a support level
-        sell_breakdown = any(bar.close <= s <= prev.close for s in supports)
+        # SELL — close breaks below (or reaches within tolerance of) a support
+        sell_breakdown = any(
+            prev.close > s and bar.close <= s * (1 + _LEVEL_TOL) for s in supports
+        )
 
-        # SELL — rejection from resistance (wick punched above, closed back below)
+        # SELL — rejection from resistance (wick reached up to/near it, closed below)
         sell_rejection = (
             bar_range > 0
             and upper_wick >= _WICK_RATIO * bar_range
-            and any(bar.close < r < bar.high for r in resistances)
+            and any(bar.high >= r * (1 - _LEVEL_TOL) and bar.close < r for r in resistances)
         )
 
         if buy_breakout or buy_bounce:
