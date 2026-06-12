@@ -31,9 +31,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from datetime import datetime, time as dtime, timedelta
-from zoneinfo import ZoneInfo
-
 from alerts.notifier import NullNotifier, TelegramNotifier
 from core.log_sanitizer import setup_logging
 from strategy.base import TF_H1, TF_H4
@@ -250,55 +247,27 @@ def _send_alert(instr: _Instrument, direction: str, entry: float,
 
 # ── Market-hours sleep ────────────────────────────────────────────────────────
 
-_ET = ZoneInfo("America/New_York")
-_MARKET_OPEN  = dtime(9, 30)
-_MARKET_CLOSE = dtime(15, 30)   # 30-min buffer before 16:00 close
-
-
-def _next_market_open_et() -> datetime:
-    """Return the next NYSE open as a tz-aware ET datetime."""
-    now = datetime.now(tz=_ET)
-    candidate = now.replace(hour=9, minute=30, second=0, microsecond=0)
-
-    # If we're already past the cutoff today, roll to next day
-    if now.time() >= _MARKET_CLOSE:
-        candidate += timedelta(days=1)
-
-    # Advance past weekends
-    while candidate.weekday() >= 5:   # 5=Sat, 6=Sun
-        candidate += timedelta(days=1)
-
-    return candidate
+_CLOSED_POLL_S = 5 * 60   # while closed, re-check every 5 min (no network, one log line)
 
 
 def _wait_for_market_open(logger: logging.Logger) -> None:
     """
-    If all markets are currently closed, sleep until the next NYSE open
-    (09:30 ET on the next trading day) rather than spinning every 20 min.
-    Wakes up 2 minutes early so the first scan fires right at open.
-    Respects MAX_RUNTIME_S — exits cleanly if runtime would be exceeded.
+    While the market is closed, sleep in 5-minute chunks instead of running
+    full Yahoo scans every cycle. Logs once when it starts waiting, then stays
+    quiet until the market reopens. Respects shutdown signals promptly.
+
+    The near-24h schedule (Sun 18:00 ET → Fri 17:00 ET, daily 17:00-18:00 break)
+    lives in strategy.market_hours.is_tradeable — this just polls it.
     """
-    if is_tradeable("US500"):   # representative — all three share the same hours
+    if is_tradeable():
         return
 
-    next_open = _next_market_open_et()
-    wake_time = next_open - timedelta(minutes=2)
-    now       = datetime.now(tz=_ET)
-    wait_s    = (wake_time - now).total_seconds()
+    logger.info("Market closed — pausing scans until it reopens (checking every 5 min)")
+    while _running and not is_tradeable():
+        time.sleep(_CLOSED_POLL_S)
 
-    if wait_s <= 0:
-        return
-
-    logger.info(
-        "Markets closed — sleeping %.0f min until %s ET  (next NYSE open)",
-        wait_s / 60,
-        next_open.strftime("%H:%M"),
-    )
-
-    # Sleep in 60-second chunks so SIGTERM is handled promptly
-    deadline = time.time() + wait_s
-    while _running and time.time() < deadline:
-        time.sleep(min(60, deadline - time.time()))
+    if _running:
+        logger.info("Market reopened — resuming scans")
 
 
 # ── Health server (keeps Render / cloud host alive) ────────────────────────────
