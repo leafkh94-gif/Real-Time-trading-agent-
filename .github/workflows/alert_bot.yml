@@ -51,6 +51,10 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
+          CAPITAL_API_KEY:    ${{ secrets.CAPITAL_API_KEY }}
+          CAPITAL_IDENTIFIER: ${{ secrets.CAPITAL_IDENTIFIER }}
+          CAPITAL_PASSWORD:   ${{ secrets.CAPITAL_PASSWORD }}
+          CAPITAL_DEMO:       'true'    # demo endpoint — same prices, no risk
           ENVIRONMENT:        development
           MAX_RUNTIME_S:      '20400'   # 340 min = 5h40m
           PORT:               '8080'
