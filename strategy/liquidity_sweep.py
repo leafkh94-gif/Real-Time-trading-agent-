@@ -7,17 +7,11 @@ the bar closes back above that low → institutional buyers absorbed the sells
 
 A bullish sweep: price briefly pierces a recent swing high, closes back below
 → signal is 'sell'.
-
-This is the original simple version (no BOS confirmation required) — a single
-candle that wicks through a swing level and closes back inside is sufficient.
 """
-import logging
 from typing import Optional, Sequence
 
 from strategy.base import Candle
 from strategy.indicators import swing_highs, swing_lows
-
-logger = logging.getLogger(__name__)
 
 
 class LiquiditySweepDetector:
@@ -40,7 +34,6 @@ class LiquiditySweepDetector:
         Returns 'buy', 'sell', or None.
         """
         if len(candles) < self.min_candles:
-            logger.info("sweep diag: not enough candles (%d < %d)", len(candles), self.min_candles)
             return None
 
         window = list(candles[-(self.lookback + self.sweep_lookback * 2 + 1):])
@@ -52,26 +45,18 @@ class LiquiditySweepDetector:
         recent_highs = [v for v in sh[:-2] if v is not None]
         recent_lows  = [v for v in sl[:-2] if v is not None]
 
-        logger.info(
-            "sweep diag: window=%d bars | swing_highs=%d swing_lows=%d",
-            len(window), len(recent_highs), len(recent_lows),
-        )
-
         # Check each of the last 2 bars as a potential sweep candle
         for bar in list(candles)[-2:]:
             # Bearish sweep of a swing low → buy signal
             if recent_lows:
-                nearest_low = min(recent_lows, key=lambda lv: abs(lv - bar.close))
+                nearest_low = recent_lows[-1]   # most recent swing low by time
                 if bar.low < nearest_low and bar.close > nearest_low:
-                    logger.info("sweep diag: BUY sweep — wick below %.4f, close %.4f", nearest_low, bar.close)
                     return "buy"
 
             # Bullish sweep of a swing high → sell signal
             if recent_highs:
-                nearest_high = min(recent_highs, key=lambda hv: abs(hv - bar.close))
+                nearest_high = recent_highs[-1]  # most recent swing high by time
                 if bar.high > nearest_high and bar.close < nearest_high:
-                    logger.info("sweep diag: SELL sweep — wick above %.4f, close %.4f", nearest_high, bar.close)
                     return "sell"
 
-        logger.info("sweep diag: no sweep in last 2 bars")
         return None
