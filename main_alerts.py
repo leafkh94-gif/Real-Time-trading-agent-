@@ -113,7 +113,7 @@ def _build_message(instr: _Instrument, direction: str,
                    entry: float, tp: float, sl: float) -> tuple[str, str]:
     """Return (html, plain) alert strings."""
     import datetime
-    now       = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    now       = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     emoji     = "🟢" if direction == "buy" else "🔴"
     dir_label = "BUY"  if direction == "buy" else "SELL"
     risk      = abs(entry - sl)
@@ -245,6 +245,31 @@ def _send_alert(instr: _Instrument, direction: str, entry: float,
         logger.error("%s: alert error: %s", instr.epic, exc)
 
 
+# ── Market-hours sleep ────────────────────────────────────────────────────────
+
+_CLOSED_POLL_S = 5 * 60   # while closed, re-check every 5 min (no network, one log line)
+
+
+def _wait_for_market_open(logger: logging.Logger) -> None:
+    """
+    While the market is closed, sleep in 5-minute chunks instead of running
+    full Yahoo scans every cycle. Logs once when it starts waiting, then stays
+    quiet until the market reopens. Respects shutdown signals promptly.
+
+    The near-24h schedule (Sun 18:00 ET → Fri 17:00 ET, daily 17:00-18:00 break)
+    lives in strategy.market_hours.is_tradeable — this just polls it.
+    """
+    if is_tradeable():
+        return
+
+    logger.info("Market closed — pausing scans until it reopens (checking every 5 min)")
+    while _running and not is_tradeable():
+        time.sleep(_CLOSED_POLL_S)
+
+    if _running:
+        logger.info("Market reopened — resuming scans")
+
+
 # ── Health server (keeps Render / cloud host alive) ────────────────────────────
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -293,7 +318,7 @@ def main() -> None:
     _load_cooldowns(WATCHLIST)
 
     import datetime as _dt
-    _startup_time = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    _startup_time = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     _notify(notifier,
             f"🟡 <b>Alert bot started</b> — <i>{_startup_time}</i>\n"
             "Watching S&amp;P 500, Nasdaq 100, Dow Jones. Scanning every 20 min.",
@@ -311,6 +336,8 @@ def main() -> None:
                 f", max runtime {max_runtime_s}s" if max_runtime_s else "")
 
     while _running:
+        _wait_for_market_open(logger)   # sleep until 09:30 ET if markets are closed
+
         for instr in WATCHLIST:
             if not _running:
                 break
