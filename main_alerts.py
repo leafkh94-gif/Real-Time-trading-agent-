@@ -1,7 +1,7 @@
 """
 main_alerts.py — multi-market alert bot (no execution, no broker login).
 
-Watches Gold, S&P 500, Nasdaq 100, and Dow Jones via Yahoo Finance (free).
+Watches Gold, S&P 500, Nasdaq 100, and Dow Jones via the Capital.com API.
 When GoldStrategy detects a setup it sends a Telegram message with
 entry price, take profit, and stop loss — no trades are placed.
 
@@ -11,8 +11,12 @@ Usage:
 Required .env keys:
   TELEGRAM_BOT_TOKEN
   TELEGRAM_CHAT_ID
+  CAPITAL_API_KEY
+  CAPITAL_IDENTIFIER   (your Capital.com login email)
+  CAPITAL_PASSWORD
 
-No Capital.com or TradingView account required.
+Optional:
+  CAPITAL_DEMO=false   (default true — demo endpoint; prices are identical)
 """
 import json
 import logging
@@ -34,7 +38,7 @@ from strategy.base import TF_H1
 from strategy.gold_strategy import GoldStrategy
 from strategy.indicators import atr as _atr
 from strategy.market_hours import is_tradeable
-from strategy.yahoo_feed import YahooFinanceFeed
+from strategy.capital_feed import CapitalComFeed
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -176,7 +180,7 @@ _US_INDEX_EPICS = frozenset({"US500", "US100", "US30"})
 
 # ── Per-instrument scan ───────────────────────────────────────────────────────
 
-def _evaluate_one(instr: _Instrument, feed: YahooFinanceFeed,
+def _evaluate_one(instr: _Instrument, feed: CapitalComFeed,
                   strategy: GoldStrategy, logger: logging.Logger):
     """
     Fetch candles and evaluate strategy.
@@ -279,10 +283,37 @@ def main() -> None:
             "Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to your .env file."
         )
 
-    # One feed per instrument (Yahoo Finance — no auth required)
-    feeds: dict[str, YahooFinanceFeed] = {
-        instr.epic: YahooFinanceFeed(instr.epic) for instr in WATCHLIST
-    }
+    # One feed per instrument (Capital.com REST API)
+    cap_key      = os.getenv("CAPITAL_API_KEY", "")
+    cap_id       = os.getenv("CAPITAL_IDENTIFIER", "")
+    cap_password = os.getenv("CAPITAL_PASSWORD", "")
+    cap_demo     = os.getenv("CAPITAL_DEMO", "true").lower() != "false"
+
+    if not (cap_key and cap_id and cap_password):
+        logger.error(
+            "Missing Capital.com credentials — set CAPITAL_API_KEY, "
+            "CAPITAL_IDENTIFIER and CAPITAL_PASSWORD in .env / GitHub secrets."
+        )
+        _notify(notifier,
+                "🔴 <b>Alert bot stopped</b> — missing Capital.com credentials "
+                "(CAPITAL_API_KEY / CAPITAL_IDENTIFIER / CAPITAL_PASSWORD).",
+                "Alert bot stopped — missing Capital.com credentials.")
+        sys.exit(1)
+
+    try:
+        feeds: dict[str, CapitalComFeed] = {
+            instr.epic: CapitalComFeed(cap_key, cap_id, cap_password,
+                                       epic=instr.epic, demo=cap_demo)
+            for instr in WATCHLIST
+        }
+    except Exception as exc:
+        logger.error("Capital.com login failed: %s", exc)
+        _notify(notifier,
+                "🔴 <b>Alert bot stopped</b> — Capital.com login failed. "
+                "Check API key / identifier / password "
+                f"(demo={'on' if cap_demo else 'off'}).",
+                "Alert bot stopped — Capital.com login failed.")
+        sys.exit(1)
 
     _load_cooldowns(WATCHLIST)
 
@@ -317,7 +348,7 @@ def main() -> None:
             if result is not None:
                 candles, direction = result
                 pending[instr.epic] = (instr, candles, direction)
-            time.sleep(3)   # stagger requests to avoid Yahoo Finance rate limits
+            time.sleep(3)   # stagger requests to respect Capital.com rate limits
 
         # ── Phase 2: US index consensus — suppress the lone contradicting signal
         us_pending = {e: v for e, v in pending.items() if e in _US_INDEX_EPICS}
