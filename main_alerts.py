@@ -2,7 +2,7 @@
 main_alerts.py — multi-market alert bot (no execution, no broker login).
 
 Watches Gold, S&P 500, Nasdaq 100, and Dow Jones via the Capital.com API.
-When GoldStrategy detects a setup it sends a Telegram message with
+When SmartTradingBotStrategy detects a setup it sends a Telegram message with
 entry price, take profit, and stop loss — no trades are placed.
 
 Usage:
@@ -35,12 +35,12 @@ load_dotenv()
 from alerts.notifier import NullNotifier, TelegramNotifier
 from core.log_sanitizer import setup_logging
 from strategy.base import TF_H1
-from strategy.gold_strategy import GoldStrategy
+from strategy.gold_strategy import SmartTradingBotStrategy
 from strategy.indicators import atr as _atr, swing_highs, swing_lows
 from strategy.market_hours import is_tradeable
 from strategy.capital_feed import CapitalComFeed
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# ── Configuration ──────────────────────────────────────────────────────────
 
 SCAN_INTERVAL_S       = 20 * 60    # seconds between full watchlist scans
 ALERT_COOLDOWN_S      = 60 * 60    # confirmed alert cooldown per instrument
@@ -78,7 +78,7 @@ WATCHLIST: list[_Instrument] = [
     _Instrument("US30",  "Dow Jones (US30)"),
 ]
 
-# ── Cooldown persistence ─────────────────────────────────────────────────────
+# ── Cooldown persistence ───────────────────────────────────────────────────
 
 def _load_cooldowns(instruments: list) -> None:
     try:
@@ -107,7 +107,7 @@ def _save_cooldown(instr) -> None:
         logging.getLogger(__name__).warning("Could not save cooldown state: %s", exc)
 
 
-# ── Graceful shutdown ─────────────────────────────────────────────────────────
+# ── Graceful shutdown ───────────────────────────────────────────────────────
 
 _running = True
 
@@ -118,7 +118,7 @@ def _handle_shutdown(sig, frame):  # noqa: ARG001
     _running = False
 
 
-# ── Alert formatting ──────────────────────────────────────────────────────────
+# ── Alert formatting ────────────────────────────────────────────────────────
 
 def _strip(s: str) -> str:
     return s.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
@@ -189,7 +189,7 @@ def _notify(notifier, html: str, plain: str) -> None:
         notifier.send(plain)
 
 
-# ── Heartbeat ─────────────────────────────────────────────────────────────────
+# ── Heartbeat ───────────────────────────────────────────────────────────────
 
 _last_heartbeat: float = 0.0
 
@@ -213,11 +213,11 @@ def _maybe_send_heartbeat(notifier, instruments: list, logger: logging.Logger) -
     logger.info("Daily heartbeat sent")
 
 
-# ── US index consensus ────────────────────────────────────────────────────────
+# ── US index consensus ──────────────────────────────────────────────────────
 
 _US_INDEX_EPICS = frozenset({"US500", "US100", "US30"})
 
-# ── Per-instrument scan ───────────────────────────────────────────────────────
+# ── Per-instrument scan ────────────────────────────────────────────────────
 
 def _sweep_sl(h1: list, direction: str, current_atr: float) -> float:
     """SL = extreme of the sweep candle ± SL_ATR_MULT × ATR (per strategy spec)."""
@@ -242,7 +242,7 @@ def _nearest_swing_tp(h1: list, entry: float, direction: str) -> float | None:
 
 
 def _evaluate_one(instr: _Instrument, feed: CapitalComFeed,
-                  strategy: GoldStrategy, logger: logging.Logger):
+                   strategy: SmartTradingBotStrategy, logger: logging.Logger):
     """
     Fetch candles and evaluate strategy.
     Returns (candles, direction, confirmed) if a signal is found, else None.
@@ -274,7 +274,7 @@ def _evaluate_one(instr: _Instrument, feed: CapitalComFeed,
 
 
 def _send_alert(instr: _Instrument, candles, direction: str, confirmed: bool,
-                notifier, logger: logging.Logger) -> None:
+                 notifier, logger: logging.Logger) -> None:
     """Send setup forming alert and (when confirmed) the full BOS-confirmed alert."""
     try:
         h1 = candles.get(TF_H1, [])
@@ -287,7 +287,7 @@ def _send_alert(instr: _Instrument, candles, direction: str, confirmed: bool,
         current_atr = valid_atr[-1]
         entry       = h1[-1].close
 
-        # ── Setup forming alert (🟡) ─────────────────────────────────────────
+        # ── Setup forming alert (🟡) ──────────────────────────────────────────
         if not instr.setup_on_cooldown():
             # watch_level = level that BOS would need to break
             if direction == "buy":
@@ -324,7 +324,7 @@ def _send_alert(instr: _Instrument, candles, direction: str, confirmed: bool,
         logger.error("%s: alert error: %s", instr.epic, exc)
 
 
-# ── Health server (keeps Render free tier alive) ──────────────────────────────
+# ── Health server (keeps Render free tier alive) ────────────────────────────
 
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -341,7 +341,7 @@ def _start_health_server() -> None:
     logging.getLogger(__name__).info("Health server listening on port %d", port)
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ── Entry point ────────────────────────────────────────────────────────────
 
 def main() -> None:
     setup_logging()
@@ -404,11 +404,15 @@ def main() -> None:
     _startup_time = _dt.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     _notify(notifier,
             f"🟡 <b>Alert bot started</b> — <i>{_startup_time}</i>\n"
-            "Watching Gold, S&amp;P 500, Nasdaq 100, Dow Jones. Scanning every 30 min.",
-            f"Alert bot started {_startup_time}. Watching Gold, S&P 500, Nasdaq, Dow. Scanning every 30 min.")
+            "Watching Gold, S&amp;P 500, Nasdaq 100, Dow Jones. Scanning every 20 min.",
+            f"Alert bot started {_startup_time}. Watching Gold, S&P 500, Nasdaq, Dow. Scanning every 20 min.")
     logger.info("Startup notification sent")
 
-    strategy  = GoldStrategy()
+    # Initialize strategy instances for each market
+    strategies: dict[str, SmartTradingBotStrategy] = {
+        instr.epic: SmartTradingBotStrategy(epic=instr.epic)
+        for instr in WATCHLIST
+    }
     epic_list = ", ".join(i.epic for i in WATCHLIST)
 
     # Optional bounded runtime (used by the cloud runner so each job exits
@@ -426,7 +430,7 @@ def main() -> None:
         for instr in WATCHLIST:
             if not _running:
                 break
-            result = _evaluate_one(instr, feeds[instr.epic], strategy, logger)
+            result = _evaluate_one(instr, feeds[instr.epic], strategies[instr.epic], logger)
             if result is not None:
                 candles, direction, confirmed = result
                 pending[instr.epic] = (instr, candles, direction, confirmed)
