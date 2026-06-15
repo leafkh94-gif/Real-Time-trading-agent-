@@ -137,11 +137,10 @@ class SmartTradingBotStrategy(StrategyBase):
 
         logger.info(f"[{self.epic}] evaluate: {len(h4)} H4 candles, {len(h1)} H1 candles")
 
-        # Gate 5 first (fail fast on session)
         now_utc = datetime.now(tz=ZoneInfo("UTC"))
-        if not self._gate5_session_filter(now_utc):
-            logger.info(f"[{self.epic}] gate5 SKIP: outside active session")
-            return None
+        _in_session = self._gate5_session_filter(now_utc)
+        if not _in_session:
+            logger.info(f"[{self.epic}] gate5 FYI: outside active session — continuing")
 
         if not self._check_signal_lock(now_utc):
             logger.info(f"[{self.epic}] SKIP: signal lock active")
@@ -210,6 +209,7 @@ class SmartTradingBotStrategy(StrategyBase):
             stop_loss=sl_price,
             take_profit=float(final_tp),
             timestamp=now_utc.isoformat(),
+            comment="" if _in_session else "⚠️ Off-session",
         )
         self.last_signal_time[self.epic] = now_utc
         logger.info(

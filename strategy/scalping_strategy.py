@@ -49,6 +49,7 @@ class ScalpingResult:
 
     h1_bias:    Optional[str]   = None  # "up", "down", "ranging"
     atr_m15:    Optional[float] = None
+    in_session: bool = True             # FYI only — False = outside London/NY hours
 
 
 class ScalpingStrategy:
@@ -112,12 +113,13 @@ class ScalpingStrategy:
             return result
         result.gates_passed.append("gate4_bos_confirmation")
 
-        # Gate 5: session + news filter
+        # Gate 5: session + news filter (FYI only — not a hard block)
         session_ok, session_note = self._gate5_session(now_utc, news_times)
-        if not session_ok:
-            result.reason = f"gate5 FAIL: {session_note}"
-            return result
-        result.gates_passed.append(f"gate5_session ({session_note})")
+        result.in_session = session_ok
+        result.gates_passed.append(
+            f"gate5_session ({session_note})" if session_ok
+            else f"gate5_FYI (off-session: {session_note})"
+        )
 
         # Gate 6: RSI + Stochastic
         if not self._gate6_momentum(m15_df, sweep_dir):
