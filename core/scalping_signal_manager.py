@@ -3,16 +3,21 @@ Per-instrument state manager for Plan B.
 
 Tracks:
   - last alert time   → enforces the 30-minute alert cooldown
-  - open trade info   → enforces the 2-hour "TP1 not hit" time-stop
+  - open trade info   → enforces the 2-hour “TP1 not hit” time-stop
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 from strategy.scalping_config import ScalpingConfig
+
+
+def _now() -> datetime:
+    """Naive UTC datetime (avoids DeprecationWarning from utcnow())."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 @dataclass
@@ -29,10 +34,10 @@ class ScalpingSignalManager:
         self._last_alert:  Dict[str, datetime] = {}
         self._open_trades: Dict[str, _OpenTrade] = {}
 
-    # ── Cooldown ──────────────────────────────────────────────────────────────
+    # ── Cooldown ──────────────────────────────────────────────────────
 
     def can_alert(self, instrument: str, now_utc: Optional[datetime] = None) -> bool:
-        now_utc = now_utc or datetime.utcnow()
+        now_utc = now_utc or _now()
         last    = self._last_alert.get(instrument)
         if last is None:
             return True
@@ -46,13 +51,13 @@ class ScalpingSignalManager:
         tp1:        float,
         now_utc:    Optional[datetime] = None,
     ) -> None:
-        now_utc = now_utc or datetime.utcnow()
+        now_utc = now_utc or _now()
         self._last_alert[instrument]  = now_utc
         self._open_trades[instrument] = _OpenTrade(
             direction=direction, entry=entry, tp1=tp1, opened_at=now_utc
         )
 
-    # ── Time stop ─────────────────────────────────────────────────────────────
+    # ── Time stop ─────────────────────────────────────────────────────
 
     def check_time_stop(
         self,
@@ -64,7 +69,7 @@ class ScalpingSignalManager:
         Returns a warning message if the tracked trade has exceeded PLAN_B_TIME_STOP_S
         without reaching TP1. Clears the trade record on TP1 hit or time stop.
         """
-        now_utc = now_utc or datetime.utcnow()
+        now_utc = now_utc or _now()
         trade   = self._open_trades.get(instrument)
         if trade is None:
             return None
