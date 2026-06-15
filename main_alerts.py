@@ -135,7 +135,7 @@ def _strip(s: str) -> str:
 
 
 def _build_setup_message(instr: _Instrument, direction: str,
-                         watch_level: float) -> tuple[str, str]:
+                         watch_level: float, comment: str = "") -> tuple[str, str]:
     t         = _utcnow().strftime("%H:%M UTC")
     dir_label = "BUY" if direction == "buy" else "SELL"
     sep       = "━━━━━━━━━━━━━━━━━━"
@@ -148,6 +148,8 @@ def _build_setup_message(instr: _Instrument, direction: str,
         f"🕐 {t}",
         "<i>Not yet confirmed — wait for BOS before entering.</i>",
     ]
+    if comment:
+        lines.append(f"<i>{comment}</i>")
     html  = "\n".join(lines)
     plain = "\n".join(_strip(l) for l in lines)
     return html, plain
@@ -155,7 +157,8 @@ def _build_setup_message(instr: _Instrument, direction: str,
 
 def _build_confirmed_message(instr: _Instrument, direction: str,
                               entry: float, sl: float,
-                              tp1: float | None, tp2: float) -> tuple[str, str]:
+                              tp1: float | None, tp2: float,
+                              comment: str = "") -> tuple[str, str]:
     t         = _utcnow().strftime("%H:%M UTC")
     emoji     = "🟢" if direction == "buy" else "🔴"
     dir_label = "BUY" if direction == "buy" else "SELL"
@@ -182,6 +185,8 @@ def _build_confirmed_message(instr: _Instrument, direction: str,
         f"🕐 {t}",
         "<i>Alert only — always confirm before trading.</i>",
     ]
+    if comment:
+        lines.append(f"<i>{comment}</i>")
     html  = "\n".join(lines)
     plain = "\n".join(_strip(l) for l in lines)
     return html, plain
@@ -244,8 +249,7 @@ def _evaluate_one(instr: _Instrument, feed: CapitalComFeed,
         logger.debug("%s: both cooldowns active — skipping", instr.epic)
         return None
     if not is_tradeable(instr.epic):
-        logger.info("%s: outside trading hours — skipping", instr.epic)
-        return None
+        logger.info("%s: outside market hours (FYI) — still scanning", instr.epic)
     try:
         candles = feed.get_candles()
         h1 = candles.get(TF_H1, [])
@@ -256,14 +260,14 @@ def _evaluate_one(instr: _Instrument, feed: CapitalComFeed,
         if sig is None:
             logger.debug("%s: no signal", instr.epic)
             return None
-        return candles, sig.direction, sig.confirmed
+        return candles, sig.direction, sig.confirmed, sig.comment
     except Exception as exc:
         logger.error("%s: evaluation error: %s", instr.epic, exc)
         return None
 
 
 def _send_alert(instr: _Instrument, candles, direction: str, confirmed: bool,
-                 notifier, logger: logging.Logger) -> None:
+                 notifier, logger: logging.Logger, comment: str = "") -> None:
     try:
         h1 = candles.get(TF_H1, [])
         atr_series = _atr(h1, period=14)
@@ -281,7 +285,7 @@ def _send_alert(instr: _Instrument, candles, direction: str, confirmed: bool,
             else:
                 watch_levels = [v for v in swing_lows(h1[-30:], lookback=3) if v is not None]
                 watch = watch_levels[-1] if watch_levels else entry
-            html, plain = _build_setup_message(instr, direction, watch)
+            html, plain = _build_setup_message(instr, direction, watch, comment)
             _notify(notifier, html, plain)
             instr.mark_setup_alerted()
             logger.info("Setup alert sent: %s %s  watch=%.2f",
@@ -292,7 +296,7 @@ def _send_alert(instr: _Instrument, candles, direction: str, confirmed: bool,
             tp1 = _nearest_swing_tp(h1, entry, direction)
             tp2 = (entry + TP2_ATR_MULT * current_atr if direction == "buy"
                    else entry - TP2_ATR_MULT * current_atr)
-            html, plain = _build_confirmed_message(instr, direction, entry, sl, tp1, tp2)
+            html, plain = _build_confirmed_message(instr, direction, entry, sl, tp1, tp2, comment)
             _notify(notifier, html, plain)
             instr.mark_alerted()
             _save_cooldown(instr)
@@ -328,6 +332,8 @@ def _build_plan_b_message(instr: _Instrument, result) -> tuple[str, str]:
         "<i>⏱️ Time stop: review/close after 2h if TP1 not hit.</i>",
         "<i>Alert only — always confirm before trading.</i>",
     ]
+    if not result.in_session:
+        lines.append("<i>⚠️ Outside London/NY session — FYI only.</i>")
     html  = "\n".join(lines)
     plain = "\n".join(_strip(l) for l in lines)
     return html, plain
@@ -346,7 +352,7 @@ def _plan_b_loop(feeds: dict, notifier, logger: logging.Logger) -> None:
             if not _running:
                 break
             if not is_tradeable(instr.epic):
-                continue
+                logger.info("[Plan B] %s: outside market hours (FYI) — still scanning", instr.epic)
             try:
                 h1_df, m15_df = feeds[instr.epic].get_plan_b_candles()
                 if h1_df.empty or m15_df.empty:
@@ -490,14 +496,14 @@ def main() -> None:
                 break
             result = _evaluate_one(instr, feeds[instr.epic], strategies[instr.epic], logger)
             if result is not None:
-                candles, direction, confirmed = result
-                pending[instr.epic] = (instr, candles, direction, confirmed)
+                candles, direction, confirmed, comment = result
+                pending[instr.epic] = (instr, candles, direction, confirmed, comment)
             time.sleep(3)
 
         us_pending = {e: v for e, v in pending.items() if e in _US_INDEX_EPICS}
         if len(us_pending) >= 2:
-            buy_count  = sum(1 for _, _, d, _ in us_pending.values() if d == "buy")
-            sell_count = sum(1 for _, _, d, _ in us_pending.values() if d == "sell")
+            buy_count  = sum(1 for _, _, d, _, _ in us_pending.values() if d == "buy")
+            sell_count = sum(1 for _, _, d, _, _ in us_pending.values() if d == "sell")
             if buy_count != sell_count:
                 consensus = "buy" if buy_count > sell_count else "sell"
                 for epic in list(pending.keys()):
@@ -506,8 +512,8 @@ def main() -> None:
                                     epic, buy_count, sell_count, consensus)
                         del pending[epic]
 
-        for epic, (instr, candles, direction, confirmed) in pending.items():
-            _send_alert(instr, candles, direction, confirmed, notifier, logger)
+        for epic, (instr, candles, direction, confirmed, comment) in pending.items():
+            _send_alert(instr, candles, direction, confirmed, notifier, logger, comment)
 
         _maybe_send_heartbeat(notifier, WATCHLIST, logger)
 
