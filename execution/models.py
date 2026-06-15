@@ -17,6 +17,8 @@ class Signal:
     take_profit: Optional[float] = None
     comment: str = ""
     confirmed: bool = False  # True = BOS confirmed; False = sweep only (setup forming)
+    entry: Optional[float] = None
+    timestamp: Optional[str] = None
 
     def __post_init__(self):
         if self.direction not in ("buy", "sell"):
