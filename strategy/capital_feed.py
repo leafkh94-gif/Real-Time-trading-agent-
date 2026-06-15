@@ -12,6 +12,7 @@ import random
 import threading
 import time
 
+import pandas as pd
 import requests as _req
 
 from strategy.base import Candle, MultiTimeframeCandles, TF_H1, TF_H4
@@ -55,6 +56,22 @@ class CapitalComFeed(PriceFeed):
             TF_H4: self._fetch("HOUR_4", 200),
             TF_H1: self._fetch("HOUR",   200),
         }
+
+    def get_plan_b_candles(self) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """Return (h1_df, m15_df) as pandas DataFrames for Plan B."""
+        h1_list  = self._fetch("HOUR",      100)
+        m15_list = self._fetch("MINUTE_15", 100)
+        return self._to_df(h1_list), self._to_df(m15_list)
+
+    @staticmethod
+    def _to_df(candles: list) -> pd.DataFrame:
+        if not candles:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        return pd.DataFrame([
+            {"open": c.open, "high": c.high, "low": c.low,
+             "close": c.close, "volume": c.volume}
+            for c in candles
+        ])
 
     # ── Internal ──────────────────────────────────────────────────────────────
 

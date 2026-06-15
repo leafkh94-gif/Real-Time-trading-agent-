@@ -34,11 +34,14 @@ load_dotenv()
 
 from alerts.notifier import NullNotifier, TelegramNotifier
 from core.log_sanitizer import setup_logging
+from core.scalping_signal_manager import ScalpingSignalManager
 from strategy.base import TF_H1
 from strategy.gold_strategy import SmartTradingBotStrategy
 from strategy.indicators import atr as _atr, swing_highs, swing_lows
 from strategy.market_hours import is_tradeable
 from strategy.capital_feed import CapitalComFeed
+from strategy.scalping_config import PLAN_B_CONFIG
+from strategy.scalping_strategy import ScalpingStrategy
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -398,6 +401,15 @@ def main() -> None:
         sys.exit(1)
 
     _load_cooldowns(WATCHLIST)
+
+    # Start Plan B (scalping) loop in background thread
+    if PLAN_B_CONFIG.enabled:
+        t_planb = threading.Thread(
+            target=_plan_b_loop, args=(feeds, notifier, logger),
+            daemon=True, name="plan-b-scalping",
+        )
+        t_planb.start()
+        logger.info("Plan B scalping loop started (scan every %ds)", PLAN_B_CONFIG.scan_interval_s)
 
     # Startup confirmation — lets you know the cloud run picked up cleanly
     import datetime as _dt
