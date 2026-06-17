@@ -18,6 +18,7 @@ class Signal:
     comment: str = ""
     confirmed: bool = False  # True = BOS confirmed; False = sweep only (setup forming)
     entry: Optional[float] = None
+    take_profit2: Optional[float] = None   # secondary target (ATR-based)
     timestamp: Optional[str] = None
 
     def __post_init__(self):

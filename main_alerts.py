@@ -1,7 +1,7 @@
 """
 main_alerts.py — multi-market alert bot (no execution, no broker login).
 
-Watches Gold, S&P 500, Nasdaq 100, and Dow Jones via the Capital.com API.
+Watches US100, US500, US30 via the Capital.com API.
 When SmartTradingBotStrategy detects a setup it sends a Telegram message with
 entry price, take profit, and stop loss — no trades are placed.
 
@@ -52,7 +52,7 @@ def _utcnow() -> _dt.datetime:
 
 # ── Configuration ────────────────────────────────────────────────────────
 
-SCAN_INTERVAL_S       = 20 * 60
+SCAN_INTERVAL_S       = 15 * 60   # Plan A scans every 15 min
 ALERT_COOLDOWN_S      = 60 * 60
 SETUP_COOLDOWN_S      = 2 * 60 * 60
 HEARTBEAT_INTERVAL_S  = 24 * 60 * 60
@@ -82,7 +82,6 @@ class _Instrument:
 
 
 WATCHLIST: list[_Instrument] = [
-    _Instrument("GOLD",  "Gold (XAU/USD)"),
     _Instrument("US500", "S&P 500"),
     _Instrument("US100", "Nasdaq 100"),
     _Instrument("US30",  "Dow Jones (US30)"),
@@ -155,23 +154,21 @@ def _build_setup_message(instr: _Instrument, direction: str,
     return html, plain
 
 
-def _build_confirmed_message(instr: _Instrument, direction: str,
-                              entry: float, sl: float,
-                              tp1: float | None, tp2: float,
-                              comment: str = "") -> tuple[str, str]:
+def _build_confirmed_message(instr: _Instrument, sig) -> tuple[str, str]:
+    """Build alert from a Signal object produced by SmartTradingBotStrategy."""
     t         = _utcnow().strftime("%H:%M UTC")
+    direction = sig.direction
+    entry     = sig.entry
+    sl        = sig.stop_loss
+    tp        = sig.take_profit   # primary TP (passed R:R check)
+    tp2       = sig.take_profit2  # secondary ATR-based target
     emoji     = "🟢" if direction == "buy" else "🔴"
     dir_label = "BUY" if direction == "buy" else "SELL"
     sep       = "━━━━━━━━━━━━━━━━━━"
 
-    risk  = abs(entry - sl)
-    r_tp1 = abs(tp1 - entry) if tp1 else None
-    r_tp2 = abs(tp2 - entry)
-    rr1   = f"1 : {r_tp1/risk:.1f}" if (tp1 and risk > 0) else "—"
-    rr2   = f"1 : {r_tp2/risk:.1f}" if risk > 0 else "—"
-
-    tp1_line = (f"TP1    : <b>{tp1:,.2f}</b>  (R:R {rr1})" if tp1
-                else "TP1    : — (no swing target found)")
+    risk  = abs(entry - sl) if (entry and sl) else 0
+    rr1   = f"1 : {abs(tp  - entry) / risk:.1f}" if (tp  and risk > 0) else "—"
+    rr2   = f"1 : {abs(tp2 - entry) / risk:.1f}" if (tp2 and risk > 0) else "—"
 
     lines = [
         f"{emoji} <b>✅ CONFIRMED — {instr.name}</b>",
@@ -179,14 +176,15 @@ def _build_confirmed_message(instr: _Instrument, direction: str,
         f"Direction : <b>{dir_label}</b>",
         f"Entry     : <b>{entry:,.2f}</b>",
         f"SL        : <b>{sl:,.2f}</b>",
-        tp1_line,
-        f"TP2       : <b>{tp2:,.2f}</b>  (R:R {rr2})",
+        f"TP1       : <b>{tp:,.2f}</b>  (R:R {rr1})" if tp else "TP1 : —",
+        f"TP2       : <b>{tp2:,.2f}</b>  (R:R {rr2})" if tp2 else "",
         sep,
         f"🕐 {t}",
         "<i>Alert only — always confirm before trading.</i>",
     ]
-    if comment:
-        lines.append(f"<i>{comment}</i>")
+    lines = [l for l in lines if l]  # drop empty strings
+    if sig.comment:
+        lines.append(f"<i>{sig.comment}</i>")
     html  = "\n".join(lines)
     plain = "\n".join(_strip(l) for l in lines)
     return html, plain
@@ -260,50 +258,41 @@ def _evaluate_one(instr: _Instrument, feed: CapitalComFeed,
         if sig is None:
             logger.debug("%s: no signal", instr.epic)
             return None
-        return candles, sig.direction, sig.confirmed, sig.comment
+        return candles, sig   # full Signal object
     except Exception as exc:
         logger.error("%s: evaluation error: %s", instr.epic, exc)
         return None
 
 
-def _send_alert(instr: _Instrument, candles, direction: str, confirmed: bool,
-                 notifier, logger: logging.Logger, comment: str = "") -> None:
+def _send_alert(instr: _Instrument, candles, sig, notifier, logger: logging.Logger) -> None:
     try:
-        h1 = candles.get(TF_H1, [])
-        atr_series = _atr(h1, period=14)
-        valid_atr  = [v for v in atr_series if v == v]
-        if not valid_atr:
-            logger.warning("%s: ATR unavailable — skipping alert", instr.epic)
-            return
-        current_atr = valid_atr[-1]
-        entry       = h1[-1].close
+        direction = sig.direction
+        confirmed = sig.confirmed
 
-        if not instr.setup_on_cooldown():
+        # Setup alert (sweep detected but no BOS yet — future use)
+        if not confirmed and not instr.setup_on_cooldown():
+            h1 = candles.get(TF_H1, [])
+            entry = h1[-1].close if h1 else 0.0
             if direction == "buy":
                 watch_levels = [v for v in swing_highs(h1[-30:], lookback=3) if v is not None]
-                watch = watch_levels[-1] if watch_levels else entry
             else:
                 watch_levels = [v for v in swing_lows(h1[-30:], lookback=3) if v is not None]
-                watch = watch_levels[-1] if watch_levels else entry
-            html, plain = _build_setup_message(instr, direction, watch, comment)
+            watch = watch_levels[-1] if watch_levels else entry
+            html, plain = _build_setup_message(instr, direction, watch, sig.comment)
             _notify(notifier, html, plain)
             instr.mark_setup_alerted()
-            logger.info("Setup alert sent: %s %s  watch=%.2f",
-                        instr.epic, direction.upper(), watch)
+            logger.info("Setup alert sent: %s %s watch=%.2f", instr.epic, direction.upper(), watch)
 
+        # Confirmed alert (all 6 gates passed)
         if confirmed and not instr.on_cooldown():
-            sl  = _sweep_sl(h1, direction, current_atr)
-            tp1 = _nearest_swing_tp(h1, entry, direction)
-            tp2 = (entry + TP2_ATR_MULT * current_atr if direction == "buy"
-                   else entry - TP2_ATR_MULT * current_atr)
-            html, plain = _build_confirmed_message(instr, direction, entry, sl, tp1, tp2, comment)
+            html, plain = _build_confirmed_message(instr, sig)
             _notify(notifier, html, plain)
             instr.mark_alerted()
             _save_cooldown(instr)
             logger.info(
-                "Confirmed alert sent: %s %s  entry=%.2f  sl=%.2f  tp1=%s  tp2=%.2f  atr=%.2f",
-                instr.epic, direction.upper(), entry, sl,
-                f"{tp1:.2f}" if tp1 else "—", tp2, current_atr,
+                "Confirmed alert sent: %s %s entry=%.2f sl=%.2f tp=%.2f",
+                instr.epic, direction.upper(),
+                sig.entry or 0, sig.stop_loss or 0, sig.take_profit or 0,
             )
     except Exception as exc:
         logger.error("%s: alert error: %s", instr.epic, exc)
@@ -490,30 +479,31 @@ def main() -> None:
                 f", max runtime {max_runtime_s}s" if max_runtime_s else "")
 
     while _running:
-        pending: dict[str, tuple] = {}
+        pending: dict[str, tuple] = {}   # epic → (instr, candles, sig)
         for instr in WATCHLIST:
             if not _running:
                 break
             result = _evaluate_one(instr, feeds[instr.epic], strategies[instr.epic], logger)
             if result is not None:
-                candles, direction, confirmed, comment = result
-                pending[instr.epic] = (instr, candles, direction, confirmed, comment)
+                candles, sig = result
+                pending[instr.epic] = (instr, candles, sig)
             time.sleep(3)
 
+        # US index consensus — suppress lone contradicting signal
         us_pending = {e: v for e, v in pending.items() if e in _US_INDEX_EPICS}
         if len(us_pending) >= 2:
-            buy_count  = sum(1 for _, _, d, _, _ in us_pending.values() if d == "buy")
-            sell_count = sum(1 for _, _, d, _, _ in us_pending.values() if d == "sell")
+            buy_count  = sum(1 for _, _, s in us_pending.values() if s.direction == "buy")
+            sell_count = sum(1 for _, _, s in us_pending.values() if s.direction == "sell")
             if buy_count != sell_count:
                 consensus = "buy" if buy_count > sell_count else "sell"
                 for epic in list(pending.keys()):
-                    if epic in _US_INDEX_EPICS and pending[epic][2] != consensus:
+                    if epic in _US_INDEX_EPICS and pending[epic][2].direction != consensus:
                         logger.info("%s: suppressed — contradicts consensus (%d buy / %d sell → %s)",
                                     epic, buy_count, sell_count, consensus)
                         del pending[epic]
 
-        for epic, (instr, candles, direction, confirmed, comment) in pending.items():
-            _send_alert(instr, candles, direction, confirmed, notifier, logger, comment)
+        for epic, (instr, candles, sig) in pending.items():
+            _send_alert(instr, candles, sig, notifier, logger)
 
         _maybe_send_heartbeat(notifier, WATCHLIST, logger)
 
