@@ -1,12 +1,11 @@
 """
-Plan A — Smart Trading Bot Strategy  |  US100 · US500 · US30
-Gate 1  H4 trend   : EMA20/EMA50 slope (±0.05% threshold)
-Gate 2  H4 vol     : ATR14/Close ≤ 1.8%
-Gate 3  H1 sweep   : Liquidity sweep of last Swing H/L (20-bar window, min 5 back)
-Gate 4  H1 BOS     : Close beyond opposite swing after sweep
+Plan A — Smart Trading Bot Strategy V4  |  US100 · US500 · US30
+Gate 1  H4 trend   : EMA20 > EMA50 (BUY) / EMA20 < EMA50 (SELL) — no slope requirement
+Gate 2  H4 vol     : ATR14/Close ≥ 1.0% (reject if too quiet)
+Gate 3  H1 sweep   : Liquidity sweep of 20-bar H/L with 0.2×H1-ATR tolerance
+Gate 4  H1 BOS     : Close beyond 10-bar swing after sweep (tighter than sweep window)
 Gate 5  Session    : London/overlap/NY-early — FYI only, never blocks
-Gate 6  H1 RSI     : RSI14 > 50 (BUY) or < 50 (SELL)
-R:R check          : TP1 (nearest swing) or TP2 (2.5×ATR) must achieve ≥ 1.5
+R:R check          : TP1 (nearest pivot) or TP2 (2.5×ATR) must achieve ≥ 1.5
 Alert-only — never opens trades.
 """
 
@@ -22,20 +21,19 @@ from strategy.base import MultiTimeframeCandles, StrategyBase, TF_H1, TF_H4
 logger = logging.getLogger(__name__)
 
 # ── Parameters ──────────────────────────────────────────────────────────────
-_EMA_FAST       = 20
-_EMA_SLOW       = 50
-_SLOPE_LB       = 3            # EMA50[0] − EMA50[−3]
-_SLOPE_MIN_PCT  = 0.05
-_ATR_PERIOD     = 14
-_ATR_PCT_MAX    = 1.8          # percent
-_SWING_LB       = 20           # H1 bars to define swing reference
-_SWING_MIN_DIST = 5            # swing must be ≥ 5 bars from current
-_SWEEP_LB       = 5            # search sweep in last N closed H1 candles
-_RSI_PERIOD     = 14
-_SL_ATR_MULT    = 0.5
-_TP2_ATR_MULT   = 2.5
-_MIN_RR         = 1.5
-_LOTS           = 1.0
+_EMA_FAST        = 20
+_EMA_SLOW        = 50
+_ATR_PERIOD      = 14
+_ATR_PCT_MIN     = 1.0   # H4 ATR% must be ≥ 1.0% (reject if market too quiet)
+_SWING_LB_SWEEP  = 20    # H1 bars for sweep swing reference (Gate 3)
+_SWING_MIN_DIST  = 5     # swing must be ≥ 5 bars from current candle
+_SWING_LB_BOS    = 10    # H1 bars for BOS swing reference (Gate 4 — tighter)
+_SWEEP_LB        = 5     # search sweep in last N closed H1 candles
+_SWEEP_TOLERANCE = 0.2   # fraction of H1 ATR for proximity detection
+_SL_ATR_MULT     = 0.5
+_TP2_ATR_MULT    = 2.5
+_MIN_RR          = 1.5
+_LOTS            = 1.0
 
 _LONDON_HRS    = (8, 12)
 _OVERLAP_HRS   = (13, 17)
@@ -74,25 +72,6 @@ def _atr(candles, period: int) -> list[float]:
     return result
 
 
-def _rsi(closes: list[float], period: int) -> list[float]:
-    result: list[float] = [math.nan] * period
-    if len(closes) < period + 1:
-        return result + [math.nan] * max(0, len(closes) - period)
-    ag = al = 0.0
-    for i in range(1, period + 1):
-        d = closes[i] - closes[i - 1]
-        ag += max(d, 0.0)
-        al += max(-d, 0.0)
-    ag /= period
-    al /= period
-    result.append(100.0 if al == 0 else 100 - 100 / (1 + ag / al))
-    for i in range(period + 1, len(closes)):
-        d = closes[i] - closes[i - 1]
-        ag = (ag * (period - 1) + max(d, 0.0)) / period
-        al = (al * (period - 1) + max(-d, 0.0)) / period
-        result.append(100.0 if al == 0 else 100 - 100 / (1 + ag / al))
-    return result
-
 
 def _in_session(now_utc: datetime) -> tuple[bool, str]:
     h = now_utc.hour
@@ -130,92 +109,87 @@ class SmartTradingBotStrategy(StrategyBase):
         if not in_sess:
             logger.info("[%s] gate5 FYI: %s — continuing", self.epic, sess_note)
 
-        # Gate 1 — H4 trend: EMA20/50 + slope of EMA50
-        if len(h4) < _EMA_SLOW + _SLOPE_LB + 2:
+        # Gate 1 — H4 trend: EMA20 vs EMA50 cross (no slope threshold)
+        if len(h4) < _EMA_SLOW + 2:
             logger.debug("[%s] gate1 SKIP: only %d H4 bars", self.epic, len(h4))
             return None
         closes_h4 = [c.close for c in h4]
         ema20 = _ema(closes_h4, _EMA_FAST)
         ema50 = _ema(closes_h4, _EMA_SLOW)
-        e20, e50, e50_old = ema20[-1], ema50[-1], ema50[-1 - _SLOPE_LB]
-        if math.isnan(e50) or math.isnan(e50_old) or e50 == 0:
+        e20, e50 = ema20[-1], ema50[-1]
+        if math.isnan(e20) or math.isnan(e50):
             return None
-        slope_pct = (e50 - e50_old) / e50 * 100
-        if slope_pct > _SLOPE_MIN_PCT and e20 > e50:
+        if e20 > e50:
             direction = "buy"
-        elif slope_pct < -_SLOPE_MIN_PCT and e20 < e50:
+        elif e20 < e50:
             direction = "sell"
         else:
-            logger.info("[%s] gate1 SKIP: ranging (slope=%.3f%%)", self.epic, slope_pct)
+            logger.info("[%s] gate1 SKIP: EMA20==EMA50 (crossing)", self.epic)
             return None
-        logger.info("[%s] gate1 PASS: %s slope=%.3f%%", self.epic, direction, slope_pct)
+        logger.info("[%s] gate1 PASS: %s (EMA20=%.2f EMA50=%.2f)", self.epic, direction, e20, e50)
 
-        # Gate 2 — H4 volatility: ATR14 / Close ≤ 1.8%
+        # Gate 2 — H4 volatility: ATR14/Close must be ≥ 1.0% (reject if too quiet)
         atr_h4 = _atr(h4, _ATR_PERIOD)
         atr14 = atr_h4[-1]
         close_h4 = h4[-1].close
         if math.isnan(atr14) or close_h4 == 0:
             return None
         atr_pct = atr14 / close_h4 * 100
-        if atr_pct > _ATR_PCT_MAX:
-            logger.info("[%s] gate2 SKIP: ATR%%=%.2f > %.1f", self.epic, atr_pct, _ATR_PCT_MAX)
+        if atr_pct < _ATR_PCT_MIN:
+            logger.info("[%s] gate2 SKIP: ATR%%=%.2f < %.1f (too quiet)", self.epic, atr_pct, _ATR_PCT_MIN)
             return None
         logger.info("[%s] gate2 PASS: ATR%%=%.2f atr=%.4f", self.epic, atr_pct, atr14)
 
-        # Gates 3+4 — H1 liquidity sweep + BOS
-        if len(h1) < _SWING_LB + 3:
+        # Gates 3+4 — H1 sweep + BOS
+        if len(h1) < _SWING_LB_SWEEP + 3:
             logger.debug("[%s] gate3 SKIP: only %d H1 bars", self.epic, len(h1))
             return None
         h1c = h1[:-1]  # exclude potentially-open current candle
 
-        # Swing reference: last 20 bars, at least 5 back from current
-        sw = h1c[-_SWING_LB:-_SWING_MIN_DIST]
-        if len(sw) < 3:
-            return None
-        swing_low  = min(c.low  for c in sw)
-        swing_high = max(c.high for c in sw)
+        # H1 ATR for sweep proximity tolerance
+        atr_h1 = _atr(h1c, _ATR_PERIOD)
+        h1_atr = atr_h1[-1] if not math.isnan(atr_h1[-1]) else atr14 * 0.25
+        tol = _SWEEP_TOLERANCE * h1_atr
 
-        # Gate 3: sweep in last _SWEEP_LB closed candles
+        # Gate 3 swing reference: last 20 H1 bars, at least 5 back
+        sw_sweep = h1c[-_SWING_LB_SWEEP:-_SWING_MIN_DIST]
+        if len(sw_sweep) < 3:
+            return None
+        sweep_low  = min(c.low  for c in sw_sweep)
+        sweep_high = max(c.high for c in sw_sweep)
+
+        # Gate 3: sweep in last _SWEEP_LB closed candles (±tolerance)
         sweep_idx: int | None = None
         sweep_extreme: float = 0.0
         for i in range(max(0, len(h1c) - _SWEEP_LB), len(h1c)):
             c = h1c[i]
-            if direction == "buy" and c.low < swing_low and c.close > swing_low:
+            if direction == "buy" and c.low < sweep_low + tol and c.close > sweep_low:
                 sweep_idx, sweep_extreme = i, c.low
-            elif direction == "sell" and c.high > swing_high and c.close < swing_high:
+            elif direction == "sell" and c.high > sweep_high - tol and c.close < sweep_high:
                 sweep_idx, sweep_extreme = i, c.high
         if sweep_idx is None:
             logger.info("[%s] gate3 SKIP: no %s sweep", self.epic, direction.upper())
             return None
         logger.info("[%s] gate3 PASS: sweep h1[%d] extreme=%.2f", self.epic, sweep_idx, sweep_extreme)
 
-        # Gate 4: BOS — any candle after sweep closes beyond opposite swing
+        # Gate 4: BOS using 10-bar swing reference (tighter than sweep window)
+        bos_window = h1c[-_SWING_LB_BOS:]
+        bos_high = max(c.high for c in bos_window)
+        bos_low  = min(c.low  for c in bos_window)
+
         entry: float | None = None
         for i in range(sweep_idx + 1, len(h1c)):
             c = h1c[i]
-            if direction == "buy" and c.close > swing_high:
+            if direction == "buy" and c.close > bos_high:
                 entry = c.close
                 break
-            if direction == "sell" and c.close < swing_low:
+            if direction == "sell" and c.close < bos_low:
                 entry = c.close
                 break
         if entry is None:
             logger.info("[%s] gate4 SKIP: no BOS after sweep", self.epic)
             return None
         logger.info("[%s] gate4 PASS: BOS entry=%.2f", self.epic, entry)
-
-        # Gate 6 — H1 RSI14
-        rsi_vals = _rsi([c.close for c in h1c], _RSI_PERIOD)
-        rsi_last = rsi_vals[-1] if rsi_vals else math.nan
-        if math.isnan(rsi_last):
-            return None
-        if direction == "buy" and rsi_last <= 50:
-            logger.info("[%s] gate6 SKIP: RSI=%.1f ≤ 50 for BUY", self.epic, rsi_last)
-            return None
-        if direction == "sell" and rsi_last >= 50:
-            logger.info("[%s] gate6 SKIP: RSI=%.1f ≥ 50 for SELL", self.epic, rsi_last)
-            return None
-        logger.info("[%s] gate6 PASS: RSI=%.1f", self.epic, rsi_last)
 
         # Trade plan: SL, TP1 (nearest swing pivot), TP2 (ATR-based)
         if direction == "buy":

@@ -53,7 +53,7 @@ def _utcnow() -> _dt.datetime:
 # ── Configuration ────────────────────────────────────────────────────────
 
 SCAN_INTERVAL_S       = 15 * 60   # Plan A scans every 15 min
-ALERT_COOLDOWN_S      = 60 * 60
+ALERT_COOLDOWN_S      = 30 * 60   # 30-min cooldown per market (V4)
 SETUP_COOLDOWN_S      = 2 * 60 * 60
 HEARTBEAT_INTERVAL_S  = 24 * 60 * 60
 TP2_ATR_MULT          = 2.5
