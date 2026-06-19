@@ -1,9 +1,9 @@
 """
 main_alerts.py — multi-market alert bot (no execution, no broker login).
 
-Watches US100, US500, US30 via the Capital.com API.
-When SmartTradingBotStrategy detects a setup it sends a Telegram message with
-entry price, take profit, and stop loss — no trades are placed.
+Watches US100, US500, US30 via the Capital.com API using a unified 2-gate
+strategy on H1+M15. Sends a Telegram alert when a setup is confirmed.
+No trades are placed.
 
 Usage:
   python main_alerts.py
@@ -16,7 +16,7 @@ Required .env keys:
   CAPITAL_PASSWORD
 
 Optional:
-  CAPITAL_DEMO=false   (default true — demo endpoint; prices are identical)
+  CAPITAL_DEMO=false   (default true — demo endpoint)
 """
 import datetime as _dt
 import json
@@ -35,14 +35,9 @@ load_dotenv()
 
 from alerts.notifier import NullNotifier, TelegramNotifier
 from core.log_sanitizer import setup_logging
-from core.scalping_signal_manager import ScalpingSignalManager
-from strategy.base import TF_H1
-from strategy.gold_strategy import SmartTradingBotStrategy
-from strategy.indicators import atr as _atr, swing_highs, swing_lows
 from strategy.market_hours import is_tradeable
 from strategy.capital_feed import CapitalComFeed
-from strategy.scalping_config import PLAN_B_CONFIG
-from strategy.scalping_strategy import ScalpingStrategy
+from strategy.gold_strategy import SmartTradingBotStrategy
 
 
 def _utcnow() -> _dt.datetime:
@@ -50,35 +45,25 @@ def _utcnow() -> _dt.datetime:
     return _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
 
 
-# ── Configuration ────────────────────────────────────────────────────────
+# ── Configuration ─────────────────────────────────────────────────────────────
 
-SCAN_INTERVAL_S       = 15 * 60   # Plan A scans every 15 min
-ALERT_COOLDOWN_S      = 30 * 60   # 30-min cooldown per market (V4)
-SETUP_COOLDOWN_S      = 2 * 60 * 60
-HEARTBEAT_INTERVAL_S  = 24 * 60 * 60
-TP2_ATR_MULT          = 2.5
-SL_ATR_MULT           = 0.5
-COOLDOWN_FILE         = os.getenv("COOLDOWN_FILE", ".alert_cooldown.json")
+SCAN_INTERVAL_S      = 5 * 60        # scan every 5 min
+ALERT_COOLDOWN_S     = 60 * 60       # 60-min cooldown per market
+HEARTBEAT_INTERVAL_S = 24 * 60 * 60
+COOLDOWN_FILE        = os.getenv("COOLDOWN_FILE", ".alert_cooldown.json")
 
 
 @dataclass
 class _Instrument:
     epic: str
     name: str
-    _last_alert:       float = field(default=0.0, init=False, repr=False)
-    _last_setup_alert: float = field(default=0.0, init=False, repr=False)
+    _last_alert: float = field(default=0.0, init=False, repr=False)
 
     def on_cooldown(self) -> bool:
         return time.time() - self._last_alert < ALERT_COOLDOWN_S
 
-    def setup_on_cooldown(self) -> bool:
-        return time.time() - self._last_setup_alert < SETUP_COOLDOWN_S
-
     def mark_alerted(self) -> None:
         self._last_alert = time.time()
-
-    def mark_setup_alerted(self) -> None:
-        self._last_setup_alert = time.time()
 
 
 WATCHLIST: list[_Instrument] = [
@@ -87,7 +72,7 @@ WATCHLIST: list[_Instrument] = [
     _Instrument("US30",  "Dow Jones (US30)"),
 ]
 
-# ── Cooldown persistence ───────────────────────────────────────────────
+# ── Cooldown persistence ───────────────────────────────────────────────────────
 
 def _load_cooldowns(instruments: list) -> None:
     try:
@@ -116,7 +101,7 @@ def _save_cooldown(instr) -> None:
         logging.getLogger(__name__).warning("Could not save cooldown state: %s", exc)
 
 
-# ── Graceful shutdown ────────────────────────────────────────────────────
+# ── Graceful shutdown ─────────────────────────────────────────────────────────
 
 _running = True
 
@@ -127,64 +112,60 @@ def _handle_shutdown(sig, frame):  # noqa: ARG001
     _running = False
 
 
-# ── Alert formatting ───────────────────────────────────────────────────
+# ── Alert formatting ───────────────────────────────────────────────────────────
 
 def _strip(s: str) -> str:
-    return s.replace("<b>","").replace("</b>","").replace("<i>","").replace("</i>","")
+    return s.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
 
 
-def _build_setup_message(instr: _Instrument, direction: str,
-                         watch_level: float, comment: str = "") -> tuple[str, str]:
-    t         = _utcnow().strftime("%H:%M UTC")
-    dir_label = "BUY" if direction == "buy" else "SELL"
-    sep       = "━━━━━━━━━━━━━━━━━━"
-    lines = [
-        f"🟡 <b>SETUP FORMING — {instr.name}</b>",
-        sep,
-        f"Direction : <b>{dir_label}</b>  (sweep detected)",
-        f"Watch BOS : <b>{watch_level:,.2f}</b>",
-        sep,
-        f"🕐 {t}",
-        "<i>Not yet confirmed — wait for BOS before entering.</i>",
-    ]
-    if comment:
-        lines.append(f"<i>{comment}</i>")
-    html  = "\n".join(lines)
-    plain = "\n".join(_strip(l) for l in lines)
-    return html, plain
+def _parse_tf_status(comment: str) -> tuple[bool, bool]:
+    """Parse 'h1=1;m15=0' style comment → (h1_ok, m15_ok)."""
+    parts = {}
+    for chunk in comment.split(";"):
+        if "=" in chunk:
+            k, v = chunk.split("=", 1)
+            parts[k.strip()] = v.strip()
+    return parts.get("h1", "0") == "1", parts.get("m15", "0") == "1"
 
 
 def _build_confirmed_message(instr: _Instrument, sig) -> tuple[str, str]:
-    """Build alert from a Signal object produced by SmartTradingBotStrategy."""
-    t         = _utcnow().strftime("%H:%M UTC")
+    t         = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
     direction = sig.direction
     entry     = sig.entry
     sl        = sig.stop_loss
-    tp        = sig.take_profit   # primary TP (passed R:R check)
-    tp2       = sig.take_profit2  # secondary ATR-based target
-    emoji     = "🟢" if direction == "buy" else "🔴"
+    tp1       = sig.take_profit
+    tp2       = sig.take_profit2
+    emoji     = "🔵" if direction == "buy" else "🔴"
     dir_label = "BUY" if direction == "buy" else "SELL"
-    sep       = "━━━━━━━━━━━━━━━━━━"
+    sep       = "━━━━━━━━━━━━━━━━━━━━━━"
 
-    risk  = abs(entry - sl) if (entry and sl) else 0
-    rr1   = f"1 : {abs(tp  - entry) / risk:.1f}" if (tp  and risk > 0) else "—"
-    rr2   = f"1 : {abs(tp2 - entry) / risk:.1f}" if (tp2 and risk > 0) else "—"
+    h1_ok, m15_ok = _parse_tf_status(sig.comment or "")
+    h1_icon  = "✅" if h1_ok  else "❌"
+    m15_icon = "✅" if m15_ok else "❌"
+    tf_label = "+".join(t for t, v in [("H1", h1_ok), ("M15", m15_ok)] if v)
+
+    risk = abs(entry - sl) if (entry and sl) else 0
+    rr1  = f"{abs(tp1 - entry) / risk:.1f}" if (tp1 and risk > 0) else "—"
 
     lines = [
-        f"{emoji} <b>✅ CONFIRMED — {instr.name}</b>",
+        f"{emoji} <b>{dir_label} — {instr.name}</b>   [{tf_label}]",
         sep,
-        f"Direction : <b>{dir_label}</b>",
-        f"Entry     : <b>{entry:,.2f}</b>",
-        f"SL        : <b>{sl:,.2f}</b>",
-        f"TP1       : <b>{tp:,.2f}</b>  (R:R {rr1})" if tp else "TP1 : —",
-        f"TP2       : <b>{tp2:,.2f}</b>  (R:R {rr2})" if tp2 else "",
+        f"H1  → Sweep + BOS {h1_icon}",
+        f"M15 → Sweep + BOS {m15_icon}",
+        sep,
+        f"Entry : <b>{entry:,.2f}</b>",
+        f"SL    : <b>{sl:,.2f}</b>",
+    ]
+    if tp1:
+        lines.append(f"TP1   : <b>{tp1:,.2f}</b>  ← M15 short target")
+    if tp2:
+        lines.append(f"TP2   : <b>{tp2:,.2f}</b>  ← H1 long target")
+    lines += [
+        f"R:R   : {rr1}",
         sep,
         f"🕐 {t}",
         "<i>Alert only — always confirm before trading.</i>",
     ]
-    lines = [l for l in lines if l]  # drop empty strings
-    if sig.comment:
-        lines.append(f"<i>{sig.comment}</i>")
     html  = "\n".join(lines)
     plain = "\n".join(_strip(l) for l in lines)
     return html, plain
@@ -197,7 +178,7 @@ def _notify(notifier, html: str, plain: str) -> None:
         notifier.send(plain)
 
 
-# ── Heartbeat ────────────────────────────────────────────────────────────
+# ── Heartbeat ─────────────────────────────────────────────────────────────────
 
 _last_heartbeat: float = 0.0
 
@@ -219,169 +200,49 @@ def _maybe_send_heartbeat(notifier, instruments: list, logger: logging.Logger) -
     logger.info("Daily heartbeat sent")
 
 
-# ── US index consensus ─────────────────────────────────────────────────
+# ── US index consensus ─────────────────────────────────────────────────────────
 
 _US_INDEX_EPICS = frozenset({"US500", "US100", "US30"})
 
-# ── Per-instrument scan ────────────────────────────────────────────────
-
-def _sweep_sl(h1: list, direction: str, current_atr: float) -> float:
-    recent = h1[-3:] if len(h1) >= 3 else h1
-    if direction == "buy":
-        return min(c.low for c in recent) - SL_ATR_MULT * current_atr
-    return max(c.high for c in recent) + SL_ATR_MULT * current_atr
-
-
-def _nearest_swing_tp(h1: list, entry: float, direction: str) -> float | None:
-    window = h1[-60:] if len(h1) >= 60 else h1
-    if direction == "buy":
-        levels = [v for v in swing_highs(window, lookback=3) if v is not None and v > entry]
-        return min(levels) if levels else None
-    levels = [v for v in swing_lows(window, lookback=3) if v is not None and v < entry]
-    return max(levels) if levels else None
-
+# ── Per-instrument scan ────────────────────────────────────────────────────────
 
 def _evaluate_one(instr: _Instrument, feed: CapitalComFeed,
-                   strategy: SmartTradingBotStrategy, logger: logging.Logger):
-    if instr.on_cooldown() and instr.setup_on_cooldown():
-        logger.debug("%s: both cooldowns active — skipping", instr.epic)
+                  strategy: SmartTradingBotStrategy, logger: logging.Logger):
+    if instr.on_cooldown():
+        logger.debug("%s: cooldown active — skipping", instr.epic)
         return None
     if not is_tradeable(instr.epic):
         logger.info("%s: outside market hours (FYI) — still scanning", instr.epic)
     try:
-        candles = feed.get_candles()
-        h1 = candles.get(TF_H1, [])
-        if not h1:
-            logger.debug("%s: no H1 candles returned", instr.epic)
-            return None
+        candles = feed.get_h1_m15_candles()
         sig = strategy.evaluate(candles)
         if sig is None:
             logger.debug("%s: no signal", instr.epic)
             return None
-        return candles, sig   # full Signal object
+        return candles, sig
     except Exception as exc:
         logger.error("%s: evaluation error: %s", instr.epic, exc)
         return None
 
 
-def _send_alert(instr: _Instrument, candles, sig, notifier, logger: logging.Logger) -> None:
+def _send_alert(instr: _Instrument, sig, notifier, logger: logging.Logger) -> None:
     try:
-        direction = sig.direction
-        confirmed = sig.confirmed
-
-        # Setup alert (sweep detected but no BOS yet — future use)
-        if not confirmed and not instr.setup_on_cooldown():
-            h1 = candles.get(TF_H1, [])
-            entry = h1[-1].close if h1 else 0.0
-            if direction == "buy":
-                watch_levels = [v for v in swing_highs(h1[-30:], lookback=3) if v is not None]
-            else:
-                watch_levels = [v for v in swing_lows(h1[-30:], lookback=3) if v is not None]
-            watch = watch_levels[-1] if watch_levels else entry
-            html, plain = _build_setup_message(instr, direction, watch, sig.comment)
-            _notify(notifier, html, plain)
-            instr.mark_setup_alerted()
-            logger.info("Setup alert sent: %s %s watch=%.2f", instr.epic, direction.upper(), watch)
-
-        # Confirmed alert (all 6 gates passed)
-        if confirmed and not instr.on_cooldown():
-            html, plain = _build_confirmed_message(instr, sig)
-            _notify(notifier, html, plain)
-            instr.mark_alerted()
-            _save_cooldown(instr)
-            logger.info(
-                "Confirmed alert sent: %s %s entry=%.2f sl=%.2f tp=%.2f",
-                instr.epic, direction.upper(),
-                sig.entry or 0, sig.stop_loss or 0, sig.take_profit or 0,
-            )
+        html, plain = _build_confirmed_message(instr, sig)
+        _notify(notifier, html, plain)
+        instr.mark_alerted()
+        _save_cooldown(instr)
+        logger.info(
+            "Alert sent: %s %s entry=%.2f sl=%.2f tp1=%s tp2=%s",
+            instr.epic, sig.direction.upper(),
+            sig.entry or 0, sig.stop_loss or 0,
+            f"{sig.take_profit:.2f}" if sig.take_profit else "—",
+            f"{sig.take_profit2:.2f}" if sig.take_profit2 else "—",
+        )
     except Exception as exc:
         logger.error("%s: alert error: %s", instr.epic, exc)
 
 
-# ── Plan B alert formatting ───────────────────────────────────────────────
-
-def _build_plan_b_message(instr: _Instrument, result) -> tuple[str, str]:
-    t     = _utcnow().strftime("%H:%M UTC")
-    emoji = "🟢" if result.signal == "BUY" else "🔴"
-    sep   = "━━━━━━━━━━━━━━━━━━"
-    risk  = abs(result.entry - result.stop_loss) if result.stop_loss else 0
-    rr1   = f"1 : {abs(result.tp1 - result.entry) / risk:.1f}" if risk > 0 else "—"
-    rr2   = f"1 : {abs(result.tp2 - result.entry) / risk:.1f}" if risk > 0 else "—"
-    lines = [
-        f"{emoji} <b>[PLAN B] {instr.name}</b> — {result.signal} (Scalp/M15)",
-        sep,
-        f"H1 Bias  : <b>{result.h1_bias}</b>",
-        f"Entry    : <b>{result.entry:,.2f}</b>",
-        f"SL       : <b>{result.stop_loss:,.2f}</b>",
-        f"TP1      : <b>{result.tp1:,.2f}</b>  (R:R {rr1})",
-        f"TP2      : <b>{result.tp2:,.2f}</b>  (R:R {rr2})",
-        f"ATR(M15) : {result.atr_m15:.2f}",
-        sep,
-        f"🕐 {t}",
-        "<i>⏱️ Time stop: review/close after 2h if TP1 not hit.</i>",
-        "<i>Alert only — always confirm before trading.</i>",
-    ]
-    if not result.in_session:
-        lines.append("<i>⚠️ Outside London/NY session — FYI only.</i>")
-    html  = "\n".join(lines)
-    plain = "\n".join(_strip(l) for l in lines)
-    return html, plain
-
-
-# ── Plan B background loop ──────────────────────────────────────────────
-
-def _plan_b_loop(feeds: dict, notifier, logger: logging.Logger) -> None:
-    scalping = ScalpingStrategy(PLAN_B_CONFIG)
-    signals  = ScalpingSignalManager(PLAN_B_CONFIG)
-
-    while _running:
-        now = _utcnow()
-
-        for instr in WATCHLIST:
-            if not _running:
-                break
-            if not is_tradeable(instr.epic):
-                logger.info("[Plan B] %s: outside market hours (FYI) — still scanning", instr.epic)
-            try:
-                h1_df, m15_df = feeds[instr.epic].get_plan_b_candles()
-                if h1_df.empty or m15_df.empty:
-                    logger.debug("[Plan B] %s: empty candles", instr.epic)
-                    continue
-
-                last_price = float(m15_df["close"].iloc[-1])
-                ts_msg = signals.check_time_stop(instr.epic, last_price, now)
-                if ts_msg:
-                    _notify(notifier,
-                            f"⏱️ <b>[Plan B] {instr.name}</b>\n{ts_msg}",
-                            f"[Plan B] {instr.name}: {ts_msg}")
-
-                if not signals.can_alert(instr.epic, now):
-                    continue
-
-                result = scalping.run(h1_df, m15_df, now_utc=now)
-                if result.signal is None:
-                    logger.debug("[Plan B] %s: %s", instr.epic, result.reason)
-                    continue
-
-                html, plain = _build_plan_b_message(instr, result)
-                _notify(notifier, html, plain)
-                signals.register_alert(
-                    instr.epic, result.signal, result.entry, result.tp1, now
-                )
-                logger.info("[Plan B] Alert: %s %s entry=%.2f sl=%.2f tp1=%.2f rr=%.2f",
-                            instr.epic, result.signal, result.entry,
-                            result.stop_loss, result.tp1, result.rr)
-
-            except Exception as exc:
-                logger.error("[Plan B] %s: error: %s", instr.epic, exc)
-
-            time.sleep(2)
-
-        if _running:
-            time.sleep(PLAN_B_CONFIG.scan_interval_s)
-
-
-# ── Health server ─────────────────────────────────────────────────────────────
+# ── Health server ──────────────────────────────────────────────────────────────
 
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -398,7 +259,7 @@ def _start_health_server() -> None:
     logging.getLogger(__name__).info("Health server listening on port %d", port)
 
 
-# ── Entry point ────────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
     setup_logging()
@@ -446,24 +307,18 @@ def main() -> None:
     except Exception as exc:
         logger.error("Capital.com login failed: %s", exc)
         _notify(notifier,
-                f"🔴 <b>Alert bot stopped</b> — Capital.com login failed (demo={'on' if cap_demo else 'off'}).",
+                f"🔴 <b>Alert bot stopped</b> — Capital.com login failed "
+                f"(demo={'on' if cap_demo else 'off'}).",
                 "Alert bot stopped — Capital.com login failed.")
         sys.exit(1)
 
     _load_cooldowns(WATCHLIST)
 
-    if PLAN_B_CONFIG.enabled:
-        threading.Thread(
-            target=_plan_b_loop, args=(feeds, notifier, logger),
-            daemon=True, name="plan-b-scalping",
-        ).start()
-        logger.info("Plan B scalping loop started (scan every %ds)", PLAN_B_CONFIG.scan_interval_s)
-
     _startup_time = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
     _notify(notifier,
             f"🟡 <b>Alert bot started</b> — <i>{_startup_time}</i>\n"
-            "Watching Gold, S&amp;P 500, Nasdaq 100, Dow Jones. Scanning every 20 min.",
-            f"Alert bot started {_startup_time}. Watching Gold, S&P 500, Nasdaq, Dow.")
+            "Watching S&amp;P 500, Nasdaq 100, Dow Jones. Scanning every 5 min.",
+            f"Alert bot started {_startup_time}. Watching S&P 500, Nasdaq, Dow.")
     logger.info("Startup notification sent")
 
     strategies: dict[str, SmartTradingBotStrategy] = {
@@ -502,8 +357,8 @@ def main() -> None:
                                     epic, buy_count, sell_count, consensus)
                         del pending[epic]
 
-        for epic, (instr, candles, sig) in pending.items():
-            _send_alert(instr, candles, sig, notifier, logger)
+        for epic, (instr, _candles, sig) in pending.items():
+            _send_alert(instr, sig, notifier, logger)
 
         _maybe_send_heartbeat(notifier, WATCHLIST, logger)
 
