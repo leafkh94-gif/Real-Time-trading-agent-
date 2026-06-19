@@ -15,7 +15,7 @@ import time
 import pandas as pd
 import requests as _req
 
-from strategy.base import Candle, MultiTimeframeCandles, TF_H1, TF_H4
+from strategy.base import Candle, MultiTimeframeCandles, TF_H1, TF_H4, TF_M15
 from strategy.feed import PriceFeed
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,13 @@ class CapitalComFeed(PriceFeed):
         return {
             TF_H4: self._fetch("HOUR_4", 200),
             TF_H1: self._fetch("HOUR",   200),
+        }
+
+    def get_h1_m15_candles(self) -> MultiTimeframeCandles:
+        """Return {TF_H1: list[Candle], TF_M15: list[Candle]} for unified strategy."""
+        return {
+            TF_H1:  self._fetch("HOUR",      200),
+            TF_M15: self._fetch("MINUTE_15", 200),
         }
 
     def get_plan_b_candles(self) -> tuple[pd.DataFrame, pd.DataFrame]:
