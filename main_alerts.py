@@ -128,7 +128,9 @@ def _parse_tf_status(comment: str) -> tuple[bool, bool]:
     return parts.get("h1", "0") == "1", parts.get("m15", "0") == "1"
 
 
-def _build_confirmed_message(instr: _Instrument, sig) -> tuple[str, str]:
+def _build_confirmed_message(
+    instr: _Instrument, sig, correlated_with: list[str] | None = None
+) -> tuple[str, str]:
     t         = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
     direction = sig.direction
     entry     = sig.entry
@@ -166,6 +168,12 @@ def _build_confirmed_message(instr: _Instrument, sig) -> tuple[str, str]:
         f"🕐 {t}",
         "<i>Alert only — always confirm before trading.</i>",
     ]
+    if correlated_with:
+        others = " / ".join(correlated_with)
+        lines.append(
+            f"<i>⚠️ Also firing on {others} — US indices are correlated. "
+            f"Treat all three as one exposure, not independent trades.</i>"
+        )
     html  = "\n".join(lines)
     plain = "\n".join(_strip(l) for l in lines)
     return html, plain
@@ -225,18 +233,22 @@ def _evaluate_one(instr: _Instrument, feed: CapitalComFeed,
         return None
 
 
-def _send_alert(instr: _Instrument, sig, notifier, logger: logging.Logger) -> None:
+def _send_alert(
+    instr: _Instrument, sig, notifier, logger: logging.Logger,
+    correlated_with: list[str] | None = None,
+) -> None:
     try:
-        html, plain = _build_confirmed_message(instr, sig)
+        html, plain = _build_confirmed_message(instr, sig, correlated_with)
         _notify(notifier, html, plain)
         instr.mark_alerted()
         _save_cooldown(instr)
         logger.info(
-            "Alert sent: %s %s entry=%.2f sl=%.2f tp1=%s tp2=%s",
+            "Alert sent: %s %s entry=%.2f sl=%.2f tp1=%s tp2=%s%s",
             instr.epic, sig.direction.upper(),
             sig.entry or 0, sig.stop_loss or 0,
             f"{sig.take_profit:.2f}" if sig.take_profit else "—",
             f"{sig.take_profit2:.2f}" if sig.take_profit2 else "—",
+            f" [correlated with {correlated_with}]" if correlated_with else "",
         )
     except Exception as exc:
         logger.error("%s: alert error: %s", instr.epic, exc)
@@ -357,8 +369,15 @@ def main() -> None:
                                     epic, buy_count, sell_count, consensus)
                         del pending[epic]
 
+        # Build per-epic correlation map: if ≥2 US indices fire same direction,
+        # warn in each alert that they're correlated (one exposure, not many).
+        us_aligned = {
+            e for e, (_, _, s) in pending.items()
+            if e in _US_INDEX_EPICS
+        }
         for epic, (instr, _candles, sig) in pending.items():
-            _send_alert(instr, sig, notifier, logger)
+            corr = sorted(us_aligned - {epic}) if epic in _US_INDEX_EPICS and len(us_aligned) >= 2 else None
+            _send_alert(instr, sig, notifier, logger, correlated_with=corr)
 
         _maybe_send_heartbeat(notifier, WATCHLIST, logger)
 
