@@ -2,7 +2,7 @@
 Unified Strategy V4 (Final Simplified)  |  US100 · US500 · US30
 Gate 1  EMA Cross   : EMA20 > EMA50 → BUY, EMA20 < EMA50 → SELL
                       Must agree on BOTH H1 and M15.
-                      Neutrality: |EMA20−EMA50|/EMA50 < ema_neutral_pct → skip.
+                      Skip only if EMAs are exactly equal or data insufficient.
 Gate 2  Sweep+BOS   : Liquidity sweep of swing H/L (±sweep_tolerance×ATR),
                       BOS close within 3 candles.
                       Fires if EITHER H1 or M15 (or both) confirm.
@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class InstrumentConfig:
-    ema_neutral_pct:  float = 0.10   # skip if |EMA20−EMA50|/EMA50 < this %
     sweep_tolerance:  float = 0.20   # sweep proximity as fraction of ATR
     swing_lb:         int   = 20     # bars for swing reference window
     swing_min_dist:   int   = 3      # swing must be ≥ this many bars back
@@ -55,16 +54,16 @@ _INSTRUMENT_CONFIGS: dict[str, InstrumentConfig] = {
     # Wider SL/sweep tolerance to absorb larger intra-bar swings;
     # higher TP2 target because trends extend further before reversing.
     "US100": InstrumentConfig(
-        sl_atr_mult      = 0.60,
         sweep_tolerance  = 0.25,
+        sl_atr_mult      = 0.60,
         tp1_atr_mult_m15 = 1.00,
         tp2_atr_mult_h1  = 3.00,
         min_rr           = 1.50,
     ),
     # S&P 500 — moderate volatility; baseline calibration.
     "US500": InstrumentConfig(
-        sl_atr_mult      = 0.50,
         sweep_tolerance  = 0.20,
+        sl_atr_mult      = 0.50,
         tp1_atr_mult_m15 = 1.00,
         tp2_atr_mult_h1  = 2.50,
         min_rr           = 1.50,
@@ -72,8 +71,8 @@ _INSTRUMENT_CONFIGS: dict[str, InstrumentConfig] = {
     # Dow Jones — disciplined on a %-basis but large raw pip values;
     # slightly wider SL buffer to cope with high nominal point moves.
     "US30": InstrumentConfig(
-        sl_atr_mult      = 0.55,
         sweep_tolerance  = 0.20,
+        sl_atr_mult      = 0.55,
         tp1_atr_mult_m15 = 1.00,
         tp2_atr_mult_h1  = 2.50,
         min_rr           = 1.50,
@@ -115,8 +114,8 @@ def _atr(candles: list, period: int) -> list[float]:
     return result
 
 
-def _ema_direction(candles: list, neutral_pct: float) -> Optional[str]:
-    """Return 'buy', 'sell', or None if neutral / insufficient data."""
+def _ema_direction(candles: list) -> Optional[str]:
+    """Return 'buy', 'sell', or None if data insufficient or EMAs exactly equal."""
     if len(candles) < 52:   # EMA50 + 2 warm-up bars
         return None
     closes = [c.close for c in candles]
@@ -125,8 +124,8 @@ def _ema_direction(candles: list, neutral_pct: float) -> Optional[str]:
     e20, e50 = ema20[-1], ema50[-1]
     if math.isnan(e20) or math.isnan(e50) or e50 == 0:
         return None
-    if abs(e20 - e50) / e50 * 100 < neutral_pct:
-        return None   # too neutral
+    if e20 == e50:
+        return None   # exact cross — direction undefined
     return "buy" if e20 > e50 else "sell"
 
 
@@ -196,8 +195,8 @@ class SmartTradingBotStrategy(StrategyBase):
         now_utc = datetime.now(tz=ZoneInfo("UTC"))
 
         # ── Gate 1: EMA direction — must agree on both H1 and M15 ───────────
-        dir_h1  = _ema_direction(h1,  cfg.ema_neutral_pct)
-        dir_m15 = _ema_direction(m15, cfg.ema_neutral_pct)
+        dir_h1  = _ema_direction(h1)
+        dir_m15 = _ema_direction(m15)
 
         if dir_h1 is None:
             logger.info("[%s] gate1 SKIP: H1 EMA neutral or insufficient data", self.epic)
