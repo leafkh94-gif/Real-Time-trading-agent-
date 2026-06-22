@@ -2,20 +2,28 @@
 Unified Strategy V4 (Final Simplified)  |  US100 · US500 · US30
 Gate 1  EMA Cross   : EMA20 > EMA50 → BUY, EMA20 < EMA50 → SELL
                       Must agree on BOTH H1 and M15.
-                      Neutrality: |EMA20−EMA50|/EMA50 < 0.1% → skip.
-Gate 2  Sweep+BOS   : 20-bar liquidity sweep (±0.2×ATR tolerance),
+                      Neutrality: |EMA20−EMA50|/EMA50 < ema_neutral_pct → skip.
+Gate 2  Sweep+BOS   : Liquidity sweep of swing H/L (±sweep_tolerance×ATR),
                       BOS close within 3 candles.
                       Fires if EITHER H1 or M15 (or both) confirm.
-Trade plan:
-  SL  = sweep extreme ± 0.5×ATR (ATR from confirming TF; M15 preferred)
-  TP1 = Entry ± 1.0×ATR14_M15   (short target)
-  TP2 = Entry ± 2.5×ATR14_H1    (long target)
-  R:R ≥ 1.5 required (checked against TP1, then TP2)
-Alert-only — never opens trades. 24h operation, no session gate.
+Trade plan (calibrated per instrument):
+  SL  = sweep extreme ± sl_atr_mult × ATR (ATR from confirming TF; M15 preferred)
+  TP1 = Entry ± tp1_atr_mult_m15 × ATR14_M15   (short target)
+  TP2 = Entry ± tp2_atr_mult_h1  × ATR14_H1    (long target)
+  R:R ≥ min_rr required (checked against TP1, then TP2)
+Alert-only — never opens trades. 24h operation.
+
+Instrument calibration rationale:
+  US100 — most volatile (beta ~1.2–1.3 vs S&P): wider SL and sweep tolerance,
+           higher TP2 multiplier since it trends further.
+  US500 — moderate volatility: baseline / reference calibration.
+  US30  — large nominal pip value; ATR accounts for this but needs a slightly
+           wider SL buffer due to price scale (wide raw-point moves).
 """
 
 import logging
 import math
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -25,20 +33,54 @@ from strategy.base import MultiTimeframeCandles, StrategyBase, TF_H1, TF_M15
 
 logger = logging.getLogger(__name__)
 
-# ── Parameters ───────────────────────────────────────────────────────────────
-_EMA_FAST         = 20
-_EMA_SLOW         = 50
-_ATR_PERIOD       = 14
-_EMA_NEUTRAL_PCT  = 0.1    # skip if |EMA20-EMA50|/EMA50 < 0.1%
-_SWING_LB         = 20     # bars for sweep swing reference
-_SWING_MIN_DIST   = 3      # swing must be ≥ 3 bars back from current
-_BOS_WINDOW       = 3      # BOS must close within this many candles of sweep
-_SWEEP_TOLERANCE  = 0.2    # fraction of ATR for sweep proximity
-_SL_ATR_MULT      = 0.5
-_TP1_ATR_MULT_M15 = 1.0
-_TP2_ATR_MULT_H1  = 2.5
-_MIN_RR           = 1.5
-_LOTS             = 1.0
+# ── Per-instrument configuration ─────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class InstrumentConfig:
+    ema_neutral_pct:  float = 0.10   # skip if |EMA20−EMA50|/EMA50 < this %
+    sweep_tolerance:  float = 0.20   # sweep proximity as fraction of ATR
+    swing_lb:         int   = 20     # bars for swing reference window
+    swing_min_dist:   int   = 3      # swing must be ≥ this many bars back
+    bos_window:       int   = 3      # BOS must close within this many candles
+    sl_atr_mult:      float = 0.50   # SL distance in ATR units
+    tp1_atr_mult_m15: float = 1.00   # TP1 as multiple of M15 ATR
+    tp2_atr_mult_h1:  float = 2.50   # TP2 as multiple of H1 ATR
+    min_rr:           float = 1.50   # minimum R:R ratio required
+    atr_period:       int   = 14
+    lots:             float = 1.0
+
+
+_INSTRUMENT_CONFIGS: dict[str, InstrumentConfig] = {
+    # Nasdaq 100 — highest volatility (beta ~1.2–1.3 vs S&P)
+    # Wider SL/sweep tolerance to absorb larger intra-bar swings;
+    # higher TP2 target because trends extend further before reversing.
+    "US100": InstrumentConfig(
+        sl_atr_mult      = 0.60,
+        sweep_tolerance  = 0.25,
+        tp1_atr_mult_m15 = 1.00,
+        tp2_atr_mult_h1  = 3.00,
+        min_rr           = 1.50,
+    ),
+    # S&P 500 — moderate volatility; baseline calibration.
+    "US500": InstrumentConfig(
+        sl_atr_mult      = 0.50,
+        sweep_tolerance  = 0.20,
+        tp1_atr_mult_m15 = 1.00,
+        tp2_atr_mult_h1  = 2.50,
+        min_rr           = 1.50,
+    ),
+    # Dow Jones — disciplined on a %-basis but large raw pip values;
+    # slightly wider SL buffer to cope with high nominal point moves.
+    "US30": InstrumentConfig(
+        sl_atr_mult      = 0.55,
+        sweep_tolerance  = 0.20,
+        tp1_atr_mult_m15 = 1.00,
+        tp2_atr_mult_h1  = 2.50,
+        min_rr           = 1.50,
+    ),
+}
+
+_DEFAULT_CONFIG = InstrumentConfig()   # fallback for unknown epics
 
 
 # ── Pure indicator helpers ────────────────────────────────────────────────────
@@ -73,41 +115,47 @@ def _atr(candles: list, period: int) -> list[float]:
     return result
 
 
-def _ema_direction(candles: list) -> Optional[str]:
+def _ema_direction(candles: list, neutral_pct: float) -> Optional[str]:
     """Return 'buy', 'sell', or None if neutral / insufficient data."""
-    if len(candles) < _EMA_SLOW + 2:
+    if len(candles) < 52:   # EMA50 + 2 warm-up bars
         return None
     closes = [c.close for c in candles]
-    ema20  = _ema(closes, _EMA_FAST)
-    ema50  = _ema(closes, _EMA_SLOW)
+    ema20  = _ema(closes, 20)
+    ema50  = _ema(closes, 50)
     e20, e50 = ema20[-1], ema50[-1]
     if math.isnan(e20) or math.isnan(e50) or e50 == 0:
         return None
-    if abs(e20 - e50) / e50 * 100 < _EMA_NEUTRAL_PCT:
+    if abs(e20 - e50) / e50 * 100 < neutral_pct:
         return None   # too neutral
     return "buy" if e20 > e50 else "sell"
 
 
-def _sweep_and_bos(candles: list, direction: str, atr_val: float
-                   ) -> Optional[tuple[float, float]]:
+def _sweep_and_bos(
+    candles: list,
+    direction: str,
+    atr_val: float,
+    cfg: InstrumentConfig,
+) -> Optional[tuple[float, float]]:
     """
-    Returns (sweep_extreme, bos_entry) if sweep followed by BOS found, else None.
+    Returns (sweep_extreme, bos_entry) if sweep + BOS found within cfg.bos_window
+    candles after sweep, else None.
     `candles` must be closed candles only (caller excludes open candle).
     """
-    if len(candles) < _SWING_LB + _BOS_WINDOW + 1:
+    min_len = cfg.swing_lb + cfg.bos_window + 1
+    if len(candles) < min_len:
         return None
-    tol = _SWEEP_TOLERANCE * atr_val
+    tol = cfg.sweep_tolerance * atr_val
 
-    sw_window  = candles[-_SWING_LB:-_SWING_MIN_DIST]
+    sw_window  = candles[-cfg.swing_lb : -cfg.swing_min_dist]
     swing_low  = min(c.low  for c in sw_window)
     swing_high = max(c.high for c in sw_window)
 
-    search     = candles[-_SWING_LB:]
+    search     = candles[-cfg.swing_lb:]
     sweep_idx: Optional[int] = None
     sweep_extreme: float     = 0.0
 
     for i, c in enumerate(search):
-        abs_i = len(candles) - _SWING_LB + i
+        abs_i = len(candles) - cfg.swing_lb + i
         if direction == "buy" and c.low < swing_low + tol and c.close > swing_low:
             sweep_idx     = abs_i
             sweep_extreme = c.low
@@ -118,7 +166,7 @@ def _sweep_and_bos(candles: list, direction: str, atr_val: float
     if sweep_idx is None:
         return None
 
-    post_sweep = candles[sweep_idx + 1 : sweep_idx + 1 + _BOS_WINDOW]
+    post_sweep = candles[sweep_idx + 1 : sweep_idx + 1 + cfg.bos_window]
     for c in post_sweep:
         if direction == "buy"  and c.close > swing_high:
             return sweep_extreme, c.close
@@ -133,9 +181,9 @@ def _sweep_and_bos(candles: list, direction: str, atr_val: float
 class SmartTradingBotStrategy(StrategyBase):
     """Unified 2-gate alert engine for US100/US500/US30 on H1+M15."""
 
-    def __init__(self, epic: str = "US500", lots: float = _LOTS):
+    def __init__(self, epic: str = "US500"):
         self.epic = epic
-        self.lots = lots
+        self._cfg = _INSTRUMENT_CONFIGS.get(epic, _DEFAULT_CONFIG)
 
     @property
     def name(self) -> str:
@@ -144,11 +192,12 @@ class SmartTradingBotStrategy(StrategyBase):
     def evaluate(self, candles: MultiTimeframeCandles) -> Optional[Signal]:
         h1  = candles.get(TF_H1,  [])
         m15 = candles.get(TF_M15, [])
+        cfg = self._cfg
         now_utc = datetime.now(tz=ZoneInfo("UTC"))
 
-        # ── Gate 1: EMA direction — must agree on both H1 and M15 ──────────
-        dir_h1  = _ema_direction(h1)
-        dir_m15 = _ema_direction(m15)
+        # ── Gate 1: EMA direction — must agree on both H1 and M15 ───────────
+        dir_h1  = _ema_direction(h1,  cfg.ema_neutral_pct)
+        dir_m15 = _ema_direction(m15, cfg.ema_neutral_pct)
 
         if dir_h1 is None:
             logger.info("[%s] gate1 SKIP: H1 EMA neutral or insufficient data", self.epic)
@@ -165,17 +214,17 @@ class SmartTradingBotStrategy(StrategyBase):
         logger.info("[%s] gate1 PASS: %s (H1+M15 agree)", self.epic, direction.upper())
 
         # ── ATR calculations ─────────────────────────────────────────────────
-        h1c  = h1[:-1]   # exclude potentially-open current candle
+        h1c  = h1[:-1]    # exclude potentially-open current candle
         m15c = m15[:-1]
 
-        atr_h1_list  = _atr(h1c,  _ATR_PERIOD)
-        atr_m15_list = _atr(m15c, _ATR_PERIOD)
+        atr_h1_list  = _atr(h1c,  cfg.atr_period)
+        atr_m15_list = _atr(m15c, cfg.atr_period)
         atr_h1  = atr_h1_list[-1]  if atr_h1_list  and not math.isnan(atr_h1_list[-1])  else 0.0
         atr_m15 = atr_m15_list[-1] if atr_m15_list and not math.isnan(atr_m15_list[-1]) else 0.0
 
         # ── Gate 2: Sweep + BOS on H1 and/or M15 ────────────────────────────
-        h1_result  = _sweep_and_bos(h1c,  direction, atr_h1)  if atr_h1  > 0 else None
-        m15_result = _sweep_and_bos(m15c, direction, atr_m15) if atr_m15 > 0 else None
+        h1_result  = _sweep_and_bos(h1c,  direction, atr_h1,  cfg) if atr_h1  > 0 else None
+        m15_result = _sweep_and_bos(m15c, direction, atr_m15, cfg) if atr_m15 > 0 else None
 
         h1_ok  = h1_result  is not None
         m15_ok = m15_result is not None
@@ -195,15 +244,15 @@ class SmartTradingBotStrategy(StrategyBase):
             sweep_extreme, entry = h1_result
             sl_atr = atr_h1
 
-        # ── Trade plan ───────────────────────────────────────────────────────
+        # ── Trade plan (per-instrument calibrated) ───────────────────────────
         if direction == "buy":
-            sl  = sweep_extreme - _SL_ATR_MULT      * sl_atr
-            tp1 = entry         + _TP1_ATR_MULT_M15 * atr_m15 if atr_m15 > 0 else None
-            tp2 = entry         + _TP2_ATR_MULT_H1  * atr_h1  if atr_h1  > 0 else None
+            sl  = sweep_extreme - cfg.sl_atr_mult      * sl_atr
+            tp1 = entry         + cfg.tp1_atr_mult_m15 * atr_m15 if atr_m15 > 0 else None
+            tp2 = entry         + cfg.tp2_atr_mult_h1  * atr_h1  if atr_h1  > 0 else None
         else:
-            sl  = sweep_extreme + _SL_ATR_MULT      * sl_atr
-            tp1 = entry         - _TP1_ATR_MULT_M15 * atr_m15 if atr_m15 > 0 else None
-            tp2 = entry         - _TP2_ATR_MULT_H1  * atr_h1  if atr_h1  > 0 else None
+            sl  = sweep_extreme + cfg.sl_atr_mult      * sl_atr
+            tp1 = entry         - cfg.tp1_atr_mult_m15 * atr_m15 if atr_m15 > 0 else None
+            tp2 = entry         - cfg.tp2_atr_mult_h1  * atr_h1  if atr_h1  > 0 else None
 
         sl_dist = abs(entry - sl)
         if sl_dist == 0:
@@ -211,16 +260,16 @@ class SmartTradingBotStrategy(StrategyBase):
 
         # R:R check — prefer TP1, fall back to TP2
         tp_use: Optional[float] = None
-        if tp1 is not None and abs(tp1 - entry) / sl_dist >= _MIN_RR:
+        if tp1 is not None and abs(tp1 - entry) / sl_dist >= cfg.min_rr:
             tp_use = tp1
-        if tp_use is None and tp2 is not None and abs(tp2 - entry) / sl_dist >= _MIN_RR:
+        if tp_use is None and tp2 is not None and abs(tp2 - entry) / sl_dist >= cfg.min_rr:
             tp_use = tp2
         if tp_use is None:
             logger.info("[%s] RR SKIP: TP1=%s TP2=%s neither meets %.1f",
                         self.epic,
                         f"{tp1:.2f}" if tp1 else "—",
                         f"{tp2:.2f}" if tp2 else "—",
-                        _MIN_RR)
+                        cfg.min_rr)
             return None
 
         rr = abs(tp_use - entry) / sl_dist
@@ -230,12 +279,12 @@ class SmartTradingBotStrategy(StrategyBase):
                     f"{tp2:.2f}" if tp2 else "—",
                     rr)
 
-        # Encode H1/M15 confirmation flags in comment for alert formatter
+        # Encode H1/M15 confirmation flags for alert formatter
         comment = f"h1={'1' if h1_ok else '0'};m15={'1' if m15_ok else '0'}"
 
         return Signal(
             direction=direction,
-            lots=self.lots,
+            lots=cfg.lots,
             confirmed=True,
             entry=entry,
             stop_loss=sl,
