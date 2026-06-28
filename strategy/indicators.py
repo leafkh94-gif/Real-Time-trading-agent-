@@ -1,76 +1,76 @@
 """
-Pure-function technical indicators. No state, no side effects.
-All functions accept plain lists or Candle sequences and return lists.
+indicators.py — indicator math + swing/pivot detection (pure pandas/numpy).
 """
 from __future__ import annotations
-from typing import Sequence
-from strategy.base import Candle
+
+import numpy as np
+import pandas as pd
+
+from .strategy_config import (
+    RSI_PERIOD, ATR_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
+    SWING_LEFT, SWING_RIGHT,
+)
 
 
-def ema(prices: Sequence[float], period: int) -> list[float]:
-    """
-    Exponential moving average. Returns a list the same length as prices;
-    leading values (before the first full period) are seeded from the SMA.
-    """
-    if len(prices) < period:
-        return []
-    k = 2.0 / (period + 1)
-    result: list[float] = []
-    seed = sum(prices[:period]) / period
-    result.append(seed)
-    for p in prices[period:]:
-        result.append(p * k + result[-1] * (1 - k))
-    # Pad the front so indices align with the input
-    return [float("nan")] * (period - 1) + result
+def ema(s: pd.Series, n: int) -> pd.Series:
+    return s.ewm(span=n, adjust=False).mean()
 
 
-def wilder_smooth(values: Sequence[float], period: int) -> list[float]:
-    """Wilder's smoothing (used for ATR). Same index-alignment contract as ema()."""
-    if len(values) < period:
-        return []
-    seed = sum(values[:period]) / period
-    result = [seed]
-    for v in values[period:]:
-        result.append((result[-1] * (period - 1) + v) / period)
-    return [float("nan")] * (period - 1) + result
+def sma(s: pd.Series, n: int) -> pd.Series:
+    return s.rolling(n).mean()
 
 
-def true_range(candles: Sequence[Candle]) -> list[float]:
-    """True range for each bar (first bar has no previous close — uses high-low)."""
-    tr = []
-    for i, c in enumerate(candles):
-        if i == 0:
-            tr.append(c.high - c.low)
-        else:
-            prev_close = candles[i - 1].close
-            tr.append(max(c.high - c.low, abs(c.high - prev_close), abs(c.low - prev_close)))
+def rsi(close: pd.Series, n: int = RSI_PERIOD) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / n, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / n, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    out = 100 - (100 / (1 + rs))
+    return out.fillna(50.0)
+
+
+def macd(close: pd.Series):
+    macd_line = ema(close, MACD_FAST) - ema(close, MACD_SLOW)
+    signal_line = ema(macd_line, MACD_SIGNAL)
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+
+def true_range(df: pd.DataFrame) -> pd.Series:
+    prev_close = df["close"].shift(1)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - prev_close).abs(),
+        (df["low"] - prev_close).abs(),
+    ], axis=1).max(axis=1)
     return tr
 
 
-def atr(candles: Sequence[Candle], period: int = 14) -> list[float]:
-    """Average True Range using Wilder's smoothing."""
-    return wilder_smooth(true_range(candles), period)
+def atr(df: pd.DataFrame, n: int = ATR_PERIOD) -> pd.Series:
+    return true_range(df).ewm(alpha=1 / n, adjust=False).mean()
 
 
-def swing_highs(candles: Sequence[Candle], lookback: int = 5) -> list[float | None]:
-    """
-    Returns a parallel list; index i holds the swing-high price if candle i is a
-    confirmed pivot high (higher than `lookback` bars on each side), else None.
-    Only indices [lookback .. len-lookback-1] can be pivots.
-    """
-    n = len(candles)
-    result: list[float | None] = [None] * n
-    for i in range(lookback, n - lookback):
-        if all(candles[i].high > candles[j].high for j in range(i - lookback, i + lookback + 1) if j != i):
-            result[i] = candles[i].high
-    return result
+def swings(df: pd.DataFrame, left: int = SWING_LEFT, right: int = SWING_RIGHT):
+    """Return (highs, lows) as lists of (index_position, price), oldest→newest.
+    A swing high at i is the max high over [i-left, i+right]; symmetric for lows."""
+    highs, lows = [], []
+    h = df["high"].to_numpy()
+    l = df["low"].to_numpy()
+    n = len(df)
+    for i in range(left, n - right):
+        win_h = h[i - left:i + right + 1]
+        win_l = l[i - left:i + right + 1]
+        if h[i] == win_h.max() and (win_h == h[i]).sum() == 1:
+            highs.append((i, h[i]))
+        if l[i] == win_l.min() and (win_l == l[i]).sum() == 1:
+            lows.append((i, l[i]))
+    return highs, lows
 
 
-def swing_lows(candles: Sequence[Candle], lookback: int = 5) -> list[float | None]:
-    """Parallel list of confirmed pivot lows."""
-    n = len(candles)
-    result: list[float | None] = [None] * n
-    for i in range(lookback, n - lookback):
-        if all(candles[i].low < candles[j].low for j in range(i - lookback, i + lookback + 1) if j != i):
-            result[i] = candles[i].low
-    return result
+def round_number_near(price: float, step: float, prox_frac: float) -> bool:
+    if step <= 0:
+        return False
+    nearest = round(price / step) * step
+    return abs(price - nearest) <= price * prox_frac
