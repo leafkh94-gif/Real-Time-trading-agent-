@@ -151,18 +151,20 @@ def _handle_shutdown(sig, frame):  # noqa: ARG001
 # prices endpoint supports this: GET /prices/{epic}?resolution=...&max=...
 # Resolutions used here: "MINUTE_15" and "DAY".
 # If your feed already has get_h1_m15_candles(), add a sibling get_candles().
+def _fetch_df(feed: CapitalComFeed, resolution: str, count: int):
+    """Return an OHLCV DataFrame using the feed's existing internals.
+
+    CapitalComFeed already has _fetch(resolution, max) -> list[Candle] and
+    _to_df(candles) -> DataFrame(open,high,low,close,volume). We reuse those
+    rather than its public get_candles() (which returns H4+H1 and takes no args).
+    """
+    candles = feed._fetch(resolution, count)
+    return feed._to_df(candles)
+
+
 def _load_market_data(feed: CapitalComFeed, epic: str, now: _dt.datetime) -> MarketData:
-    if hasattr(feed, "get_candles"):
-        m15 = feed.get_candles("MINUTE_15", 220)
-        daily = feed.get_candles("DAY", 260)
-    elif hasattr(feed, "get_ohlc"):
-        m15 = feed.get_ohlc("MINUTE_15", 220)
-        daily = feed.get_ohlc("DAY", 260)
-    else:
-        raise AttributeError(
-            "CapitalComFeed needs a get_candles(resolution, count) method returning "
-            "an OHLCV DataFrame. See the INTEGRATION POINT note in main_alerts.py."
-        )
+    m15 = _fetch_df(feed, "MINUTE_15", 220)
+    daily = _fetch_df(feed, "DAY", 260)
     return MarketData(epic=epic, m15=m15, daily=daily, now_utc=now)
 
 
