@@ -18,7 +18,7 @@ into any entrypoint.
 
 ## Run it
 ```bash
-pip install -r requirements-alerts.txt
+pip install -r requirements.txt
 python longterm_bot.py
 ```
 

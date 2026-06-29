@@ -3,7 +3,7 @@ services:
     name: longterm-smc-bot
     env: python
     plan: free
-    buildCommand: pip install -r requirements-alerts.txt
+    buildCommand: pip install -r requirements.txt
     startCommand: python longterm_bot.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN

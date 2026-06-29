@@ -3,7 +3,8 @@ name: Trading Alert Bot
 # Reliable 24/7 coverage on a PUBLIC repo (unlimited free Actions minutes).
 #
 # How it works:
-#   * Each run executes main_alerts.py for ~5h40m then exits cleanly.
+#   * Each run executes longterm_bot.py, which scans on start then every 4h.
+#     The runner's timeout (below) ends the run; the self-chain starts the next.
 #   * At the end of each run a "self-chain" step triggers the next run via
 #     the GitHub API — guaranteed handoff with no gap, no cron scheduler needed.
 #   * The schedule cron is a recovery-only watchdog: if the chain ever dies for
@@ -22,7 +23,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 355     # hard ceiling; main_alerts exits before this via MAX_RUNTIME_S
+    timeout-minutes: 355     # hard ceiling; the runner is killed here and the self-chain restarts it
 
     steps:
       - name: Checkout code
@@ -35,7 +36,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements-alerts.txt
+        run: pip install -r requirements.txt
 
       - name: Restore signals log
         uses: actions/cache@v4
