@@ -1,1 +1,1 @@
-web: python main_alerts.py
+web: python longterm_bot.py

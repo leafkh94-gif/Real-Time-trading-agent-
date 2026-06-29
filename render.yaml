@@ -1,31 +1,20 @@
 services:
   - type: web
-    name: gold-alert-bot
+    name: longterm-smc-bot
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main_alerts.py
+    buildCommand: pip install -r requirements-alerts.txt
+    startCommand: python longterm_bot.py
     envVars:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
+      - key: ACCOUNT_SIZE
+        value: "1000"
+      - key: RISK_PCT
+        value: "0.01"
+      - key: ENTER_SCORE
+        value: "70"
       - key: ENVIRONMENT
         value: development
-
-  - type: cron
-    name: gold-alert-cron
-    env: python
-    plan: free
-    schedule: "*/15 * * * *"
-    buildCommand: pip install -r requirements.txt
-    startCommand: python scan_once.py
-    envVars:
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_CHAT_ID
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
