@@ -3,7 +3,8 @@ name: Trading Alert Bot
 # Reliable 24/7 coverage on a PUBLIC repo (unlimited free Actions minutes).
 #
 # How it works:
-#   * Each run executes main_alerts.py for ~5h40m then exits cleanly.
+#   * Each run executes longterm_bot.py, which scans on start then every 4h.
+#     The runner's timeout (below) ends the run; the self-chain starts the next.
 #   * At the end of each run a "self-chain" step triggers the next run via
 #     the GitHub API — guaranteed handoff with no gap, no cron scheduler needed.
 #   * The schedule cron is a recovery-only watchdog: if the chain ever dies for
@@ -22,7 +23,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 355     # hard ceiling; main_alerts exits before this via MAX_RUNTIME_S
+    timeout-minutes: 355     # hard ceiling; the runner is killed here and the self-chain restarts it
 
     steps:
       - name: Checkout code
@@ -35,29 +36,25 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements-alerts.txt
+        run: pip install -r requirements.txt
 
-      - name: Restore cooldown state
+      - name: Restore signals log
         uses: actions/cache@v4
         with:
-          path: .alert_cooldown.json
-          key: cooldown-${{ github.run_id }}
+          path: signals_log.csv
+          key: signals-${{ github.run_id }}
           restore-keys: |
-            cooldown-
+            signals-
 
-      - name: Run alert bot (continuous, ~5h40m then clean handoff)
-        run: python main_alerts.py
+      - name: Run alert bot (continuous; scans every 4h, runner timeout handles handoff)
+        run: python longterm_bot.py
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          ANTHROPIC_API_KEY:  ${{ secrets.ANTHROPIC_API_KEY }}
-          CAPITAL_API_KEY:    ${{ secrets.CAPITAL_API_KEY }}
-          CAPITAL_IDENTIFIER: ${{ secrets.CAPITAL_IDENTIFIER }}
-          CAPITAL_PASSWORD:   ${{ secrets.CAPITAL_PASSWORD }}
-          CAPITAL_DEMO:       'true'    # demo endpoint — same prices, no risk
+          ACCOUNT_SIZE:       '1000'
+          RISK_PCT:           '0.01'
+          ENTER_SCORE:        '70'
           ENVIRONMENT:        development
-          MAX_RUNTIME_S:      '20400'   # 340 min = 5h40m
-          PORT:               '8080'
 
       - name: Self-chain — queue the next run immediately
         if: always()
