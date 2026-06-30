@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: longterm-smc-bot
+    name: smc-alert-bot
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
@@ -10,11 +10,11 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
-      - key: ACCOUNT_SIZE
-        value: "1000"
-      - key: RISK_PCT
-        value: "0.01"
-      - key: ENTER_SCORE
-        value: "70"
-      - key: ENVIRONMENT
-        value: development
+      - key: CAPITAL_API_KEY
+        sync: false
+      - key: CAPITAL_IDENTIFIER
+        sync: false
+      - key: CAPITAL_PASSWORD
+        sync: false
+      - key: CAPITAL_DEMO
+        value: "true"
