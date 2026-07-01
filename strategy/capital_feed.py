@@ -50,23 +50,31 @@ class CapitalComFeed:
         oldest row first. resolution: 'MINUTE_15', 'HOUR', 'DAY', etc.
         """
         try:
-            r    = self._request("GET", f"/prices/{self._epic}",
-                                 params={"resolution": resolution, "max": max_count})
-            rows = []
-            for p in r.json().get("prices", []):
-                def mid(s): return (s["bid"] + s["ask"]) / 2
-                rows.append({
-                    "open":   mid(p["openPrice"]),
-                    "high":   mid(p["highPrice"]),
-                    "low":    mid(p["lowPrice"]),
-                    "close":  mid(p["closePrice"]),
-                    "volume": float(p.get("lastTradedVolume", 0)),
-                })
-            return pd.DataFrame(rows) if rows else _EMPTY_DF.copy()
+            return self._to_df(self._fetch(resolution, max_count))
         except Exception as exc:
             logger.error("CapitalComFeed fetch failed (%s %s): %s",
                          self._epic, resolution, exc)
             return _EMPTY_DF.copy()
+
+    def _fetch(self, resolution: str, max_count: int) -> list:
+        """Fetch raw price rows from Capital.com prices endpoint."""
+        r = self._request("GET", f"/prices/{self._epic}",
+                          params={"resolution": resolution, "max": max_count})
+        return r.json().get("prices", [])
+
+    def _to_df(self, prices: list) -> pd.DataFrame:
+        """Convert raw Capital.com price rows to an OHLCV DataFrame."""
+        rows = []
+        for p in prices:
+            def mid(s): return (s["bid"] + s["ask"]) / 2
+            rows.append({
+                "open":   mid(p["openPrice"]),
+                "high":   mid(p["highPrice"]),
+                "low":    mid(p["lowPrice"]),
+                "close":  mid(p["closePrice"]),
+                "volume": float(p.get("lastTradedVolume", 0)),
+            })
+        return pd.DataFrame(rows) if rows else _EMPTY_DF.copy()
 
     # ── Session management ───────────────────────────────────────────────
 
