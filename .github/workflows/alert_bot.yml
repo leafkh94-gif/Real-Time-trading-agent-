@@ -3,18 +3,18 @@ name: Trading Alert Bot
 # Reliable 24/7 coverage on a PUBLIC repo (unlimited free Actions minutes).
 #
 # How it works:
-#   * Each run executes longterm_bot.py, which scans on start then every 4h.
-#     The runner's timeout (below) ends the run; the self-chain starts the next.
+#   * Each run executes longterm_bot.py, which scans every 5 min via its
+#     internal loop. The runner timeout ends the run; the self-chain restarts it.
 #   * At the end of each run a "self-chain" step triggers the next run via
-#     the GitHub API — guaranteed handoff with no gap, no cron scheduler needed.
-#   * The schedule cron is a recovery-only watchdog: if the chain ever dies for
-#     any reason, the next tick (worst-case ~60 min) restarts it automatically.
+#     the GitHub API — guaranteed handoff with no gap.
+#   * The schedule cron is a recovery-only watchdog: if the chain ever dies,
+#     the next tick (worst-case ~60 min) restarts it automatically.
 #   * concurrency group prevents duplicate runners if cron and self-chain overlap.
 
 on:
   workflow_dispatch:        # manual start / restart from the Actions tab
   schedule:
-    - cron: '0 * * * *'    # recovery watchdog: hourly (cron is unreliable; self-chain is primary)
+    - cron: '0 * * * *'    # recovery watchdog: hourly
 
 concurrency:
   group: trading-bot
@@ -23,7 +23,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 355     # hard ceiling; the runner is killed here and the self-chain restarts it
+    timeout-minutes: 355     # hard ceiling; self-chain restarts after this
 
     steps:
       - name: Checkout code
@@ -38,23 +38,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore signals log
-        uses: actions/cache@v4
-        with:
-          path: signals_log.csv
-          key: signals-${{ github.run_id }}
-          restore-keys: |
-            signals-
-
-      - name: Run alert bot (continuous; scans every 4h, runner timeout handles handoff)
+      - name: Run alert bot
         run: python longterm_bot.py
         env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
-          ACCOUNT_SIZE:       '1000'
-          RISK_PCT:           '0.01'
-          ENTER_SCORE:        '70'
-          ENVIRONMENT:        development
+          TELEGRAM_BOT_TOKEN:  ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+          CAPITAL_API_KEY:     ${{ secrets.CAPITAL_API_KEY }}
+          CAPITAL_IDENTIFIER:  ${{ secrets.CAPITAL_IDENTIFIER }}
+          CAPITAL_PASSWORD:    ${{ secrets.CAPITAL_PASSWORD }}
+          CAPITAL_DEMO:        "true"
 
       - name: Self-chain — queue the next run immediately
         if: always()
