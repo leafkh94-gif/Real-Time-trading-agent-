@@ -40,8 +40,8 @@ def _utcnow() -> _dt.datetime:
     return _dt.datetime.now(_dt.timezone.utc).replace(tzinfo=None)
 
 
-# ── Configuration ─────────────────────────────────────────────
-SCAN_INTERVAL_S      = 5 * 60         # scan every 5 min
+# ── Configuration ─────────────────────────────────────────────────────────────
+SCAN_INTERVAL_S      = 5 * 60         # scan every 5 min (15m candles update slower)
 ALERT_COOLDOWN_S     = 60 * 60        # 60-min cooldown per market
 HEARTBEAT_INTERVAL_S = 24 * 60 * 60
 STATE_FILE           = os.getenv("STATE_FILE", ".bot_state.json")
@@ -67,24 +67,25 @@ class _Instrument:
 INSTRUMENTS = [_Instrument(e, C.INSTRUMENTS[e]["name"]) for e in WATCHLIST]
 
 
-# ── Persistent bot state (daily caps + adaptive threshold) ─────────────
+# ── Persistent bot state (daily caps + adaptive threshold) ─────────────────────
 @dataclass
 class BotState:
     day: str = ""
     a_plus_today: int = 0
     watch_today: int = 0
     a_plus_threshold: float = C.A_PLUS_BASE
-    no_signal_streak: int = 0
+    no_signal_streak: int = 0          # consecutive days with zero signals
     cooldowns: dict = field(default_factory=dict)
 
     def roll_day(self, today: str, logger: logging.Logger) -> None:
+        """Apply adaptive-threshold logic when the UTC day changes."""
         if self.day == today:
             return
-        if self.day:
+        if self.day:   # not first run
             had_signals = (self.a_plus_today + self.watch_today) > 0
             if had_signals:
                 self.no_signal_streak = 0
-                if self.a_plus_today >= C.MAX_A_PLUS_PER_DAY:
+                if self.a_plus_today >= C.MAX_A_PLUS_PER_DAY:        # very active day -> raise bar
                     self.a_plus_threshold = min(C.A_PLUS_CEIL, self.a_plus_threshold + C.ADAPT_STEP_UP)
             else:
                 self.no_signal_streak += 1
@@ -132,7 +133,7 @@ def _save_state(st: BotState) -> None:
         logging.getLogger(__name__).warning("Could not save state: %s", exc)
 
 
-# ── Graceful shutdown ───────────────────────────────────────────
+# ── Graceful shutdown ─────────────────────────────────────────────────────────
 _running = True
 
 
@@ -142,15 +143,33 @@ def _handle_shutdown(sig, frame):  # noqa: ARG001
     _running = False
 
 
-# ── Market data adapter ───────────────────────────────────────────
+# ── Market data adapter ───────────────────────────────────────────────────────
+# The scoring engine needs M15 (signal/entry timeframe) + DAILY (bias) candles.
+# >>> INTEGRATION POINT <<<
+# Your CapitalComFeed must expose a method that returns an OHLCV DataFrame with
+# columns: open, high, low, close, volume (oldest -> newest). The Capital.com
+# prices endpoint supports this: GET /prices/{epic}?resolution=...&max=...
+# Resolutions used here: "MINUTE_15" and "DAY".
+# If your feed already has get_h1_m15_candles(), add a sibling get_candles().
+def _fetch_df(feed: CapitalComFeed, resolution: str, count: int):
+    """Return an OHLCV DataFrame using the feed's existing internals.
+
+    CapitalComFeed already has _fetch(resolution, max) -> list[Candle] and
+    _to_df(candles) -> DataFrame(open,high,low,close,volume). We reuse those
+    rather than its public get_candles() (which returns H4+H1 and takes no args).
+    """
+    candles = feed._fetch(resolution, count)
+    return feed._to_df(candles)
+
+
 def _load_market_data(feed: CapitalComFeed, epic: str, now: _dt.datetime) -> MarketData:
-    m15   = feed.get_candles("MINUTE_15", 220)
-    daily = feed.get_candles("DAY",       260)
+    m15 = _fetch_df(feed, "MINUTE_15", 220)
+    daily = _fetch_df(feed, "DAY", 260)
     return MarketData(epic=epic, m15=m15, daily=daily, now_utc=now)
 
 
-# ── Alert formatting ────────────────────────────────────────────
-_SEP = "╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋╋"
+# ── Alert formatting (Arabic + English technical terms) ────────────────────────
+_SEP = "━━━━━━━━━━━━━━━━━━━━"
 
 
 def _fmt(epic: str, price: float) -> str:
@@ -164,7 +183,7 @@ def _entry_label(pattern: str) -> str:
 
 
 def _build_message(sig) -> tuple[str, str]:
-    emoji     = "🔵" if sig.direction == "buy" else "🔴"
+    emoji = "🔵" if sig.direction == "buy" else "🔴"
     dir_label = "BUY" if sig.direction == "buy" else "SELL"
     tier_icon = "🟢 A+" if sig.tier == "A+" else "⚡ WATCH"
     f = lambda p: _fmt(sig.epic, p)
@@ -185,7 +204,7 @@ def _build_message(sig) -> tuple[str, str]:
         lines += [_SEP, f"🕐 صلاحية الإعداد حتى {sig.expiry_utc.strftime('%H:%M UTC')}"]
     lines.append("<i>تنبيه فقط — أكّدي قبل التنفيذ.</i>")
 
-    html  = "\n".join(lines)
+    html = "\n".join(lines)
     plain = html.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
     return html, plain
 
@@ -197,7 +216,7 @@ def _notify(notifier, html: str, plain: str) -> None:
         notifier.send(plain)
 
 
-# ── Heartbeat ───────────────────────────────────────────────────
+# ── Heartbeat ─────────────────────────────────────────────────────────────────
 _last_heartbeat: float = 0.0
 
 
@@ -211,13 +230,12 @@ def _maybe_send_heartbeat(notifier, instruments, logger) -> None:
     markets = ", ".join(i.name for i in instruments)
     html = ("🤖 <b>Alert bot — daily check-in</b>\n"
             f"<i>Watching: {markets}</i>\nNo setups in the last 24h — running normally.")
-    _notify(notifier, html,
-            html.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""))
+    _notify(notifier, html, html.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""))
     _last_heartbeat = time.time()
     logger.info("Daily heartbeat sent")
 
 
-# ── Per-instrument scan ───────────────────────────────────────────
+# ── Per-instrument scan ────────────────────────────────────────────────────────
 def _evaluate_one(instr, feed, strategy, logger, now):
     if instr.on_cooldown():
         logger.debug("%s: cooldown — skipping", instr.epic)
@@ -228,7 +246,7 @@ def _evaluate_one(instr, feed, strategy, logger, now):
         return None
     try:
         md = _load_market_data(feed, instr.epic, now)
-        strategy.a_plus_threshold = _CURRENT_THRESHOLD
+        strategy.a_plus_threshold = _CURRENT_THRESHOLD     # keep engine in sync with adaptive state
         return strategy.evaluate(md)
     except Exception as exc:
         logger.error("%s: evaluation error: %s", instr.epic, exc)
@@ -247,12 +265,10 @@ def _send_alert(instr, sig, notifier, logger) -> None:
         logger.error("%s: alert error: %s", instr.epic, exc)
 
 
-# ── Health server ──────────────────────────────────────────────
+# ── Health server ──────────────────────────────────────────────────────────────
 class _HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+        self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
     def log_message(self, *args): pass
 
 
@@ -263,10 +279,11 @@ def _start_health_server() -> None:
     logging.getLogger(__name__).info("Health server listening on port %d", port)
 
 
+# adaptive threshold shared with the engine each cycle
 _CURRENT_THRESHOLD: float = C.A_PLUS_BASE
 
 
-# ── Entry point ───────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 def main() -> None:
     global _CURRENT_THRESHOLD
     setup_logging()
@@ -276,8 +293,8 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_shutdown)
     _start_health_server()
 
-    bot_token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    chat_id     = os.getenv("TELEGRAM_CHAT_ID", "")
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if bot_token and chat_id:
         notifier = TelegramNotifier(bot_token, chat_id)
         logger.info("Telegram notifier ready (chat_id=%s)", chat_id)
@@ -285,14 +302,13 @@ def main() -> None:
         notifier = NullNotifier()
         logger.warning("No Telegram credentials — alerts will be logged only.")
 
-    cap_key      = os.getenv("CAPITAL_API_KEY", "")
-    cap_id       = os.getenv("CAPITAL_IDENTIFIER", "")
+    cap_key = os.getenv("CAPITAL_API_KEY", "")
+    cap_id = os.getenv("CAPITAL_IDENTIFIER", "")
     cap_password = os.getenv("CAPITAL_PASSWORD", "")
-    cap_demo     = os.getenv("CAPITAL_DEMO", "true").lower() != "false"
+    cap_demo = os.getenv("CAPITAL_DEMO", "true").lower() != "false"
     if not (cap_key and cap_id and cap_password):
         logger.error("Missing Capital.com credentials.")
-        _notify(notifier,
-                "🔴 <b>Alert bot stopped</b> — missing Capital.com credentials.",
+        _notify(notifier, "🔴 <b>Alert bot stopped</b> — missing Capital.com credentials.",
                 "Alert bot stopped — missing Capital.com credentials.")
         sys.exit(1)
 
@@ -301,15 +317,13 @@ def main() -> None:
                  for e in WATCHLIST}
     except Exception as exc:
         logger.error("Capital.com login failed: %s", exc)
-        _notify(notifier,
-                "🔴 <b>Alert bot stopped</b> — Capital.com login failed.",
+        _notify(notifier, "🔴 <b>Alert bot stopped</b> — Capital.com login failed.",
                 "Alert bot stopped — Capital.com login failed.")
         sys.exit(1)
 
     state = _load_state(logger)
     _CURRENT_THRESHOLD = state.a_plus_threshold
-    strategies = {e: ScoringStrategy(e, a_plus_threshold=state.a_plus_threshold)
-                  for e in WATCHLIST}
+    strategies = {e: ScoringStrategy(e, a_plus_threshold=state.a_plus_threshold) for e in WATCHLIST}
 
     started = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
     _notify(notifier,
@@ -319,16 +333,17 @@ def main() -> None:
     logger.info("Startup notification sent — watching %s", ", ".join(WATCHLIST))
 
     max_runtime_s = int(os.getenv("MAX_RUNTIME_S", "0"))
-    start_time    = time.time()
+    start_time = time.time()
 
     while _running:
         now = _utcnow()
         state.roll_day(now.strftime("%Y-%m-%d"), logger)
         _CURRENT_THRESHOLD = state.a_plus_threshold
 
-        blackout   = in_news_blackout(now)
-        candidates = {}
+        # News blackout: scan but don't emit (Section V)
+        blackout = in_news_blackout(now)
 
+        candidates = {}      # epic -> signal
         for instr in INSTRUMENTS:
             if not _running:
                 break
@@ -341,6 +356,7 @@ def main() -> None:
             logger.info("News blackout active — suppressing %d candidate(s)", len(candidates))
             candidates = {}
 
+        # Correlation filter: among US indices, keep only the strongest; BTC exempt.
         us_hits = {e: s for e, s in candidates.items() if e in _US_INDEX_GROUP}
         if len(us_hits) > 1:
             best = max(us_hits, key=lambda e: us_hits[e].score)
@@ -349,6 +365,7 @@ def main() -> None:
                     logger.info("%s: suppressed by correlation filter (kept %s)", e, best)
                     candidates.pop(e, None)
 
+        # Emit, honoring daily caps
         instr_by_epic = {i.epic: i for i in INSTRUMENTS}
         for epic, sig in sorted(candidates.items(), key=lambda kv: -kv[1].score):
             if not state.can_send(sig.tier):
