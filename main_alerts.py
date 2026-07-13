@@ -42,7 +42,8 @@ def _utcnow() -> _dt.datetime:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 SCAN_INTERVAL_S      = 5 * 60         # scan every 5 min (15m candles update slower)
-ALERT_COOLDOWN_S     = 60 * 60        # 60-min cooldown per market
+ALERT_COOLDOWN_S     = 90 * 60        # 90-min cooldown per market (v3)
+INTER_ALERT_GAP_S    = 30 * 60        # minimum 30 min between any two alerts (v3)
 HEARTBEAT_INTERVAL_S = 24 * 60 * 60
 STATE_FILE           = os.getenv("STATE_FILE", ".bot_state.json")
 
@@ -254,10 +255,12 @@ def _evaluate_one(instr, feed, strategy, logger, now):
 
 
 def _send_alert(instr, sig, notifier, logger) -> None:
+    global _last_any_alert
     try:
         html, plain = _build_message(sig)
         _notify(notifier, html, plain)
         instr.mark_alerted()
+        _last_any_alert = time.time()
         logger.info("Alert sent: %s %s %s score=%d entry=%s sl=%s",
                     instr.epic, sig.tier, sig.direction.upper(), sig.score,
                     _fmt(instr.epic, sig.entry), _fmt(instr.epic, sig.stop_loss))
@@ -281,6 +284,8 @@ def _start_health_server() -> None:
 
 # adaptive threshold shared with the engine each cycle
 _CURRENT_THRESHOLD: float = C.A_PLUS_BASE
+# timestamp of the last alert sent (any instrument) — enforces inter-alert gap
+_last_any_alert: float = 0.0
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -365,11 +370,14 @@ def main() -> None:
                     logger.info("%s: suppressed by correlation filter (kept %s)", e, best)
                     candidates.pop(e, None)
 
-        # Emit, honoring daily caps
+        # Emit, honoring daily caps and inter-alert gap
         instr_by_epic = {i.epic: i for i in INSTRUMENTS}
         for epic, sig in sorted(candidates.items(), key=lambda kv: -kv[1].score):
             if not state.can_send(sig.tier):
                 logger.info("%s: %s daily cap reached — skipping", epic, sig.tier)
+                continue
+            if time.time() - _last_any_alert < INTER_ALERT_GAP_S:
+                logger.info("%s: inter-alert gap active — skipping", epic)
                 continue
             _send_alert(instr_by_epic[epic], sig, notifier, logger)
             state.record(sig.tier)

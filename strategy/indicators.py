@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .strategy_config import (
-    RSI_PERIOD, ATR_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
+    RSI_PERIOD, ATR_PERIOD, ADX_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
     SWING_LEFT, SWING_RIGHT,
 )
 
@@ -50,6 +50,25 @@ def true_range(df: pd.DataFrame) -> pd.Series:
 
 def atr(df: pd.DataFrame, n: int = ATR_PERIOD) -> pd.Series:
     return true_range(df).ewm(alpha=1 / n, adjust=False).mean()
+
+
+def adx(df: pd.DataFrame, n: int = ADX_PERIOD) -> pd.Series:
+    """Average Directional Index — measures trend strength (not direction).
+    ADX < 18 indicates a choppy / directionless market (v3 rule)."""
+    high = df["high"]; low = df["low"]
+    up_move   = high - high.shift(1)
+    down_move = low.shift(1) - low
+    plus_dm  = pd.Series(
+        np.where((up_move > down_move) & (up_move > 0), up_move, 0.0),
+        index=df.index)
+    minus_dm = pd.Series(
+        np.where((down_move > up_move) & (down_move > 0), down_move, 0.0),
+        index=df.index)
+    tr_smooth   = true_range(df).ewm(alpha=1 / n, adjust=False).mean()
+    plus_di  = 100 * plus_dm.ewm(alpha=1 / n, adjust=False).mean() / tr_smooth.replace(0, np.nan)
+    minus_di = 100 * minus_dm.ewm(alpha=1 / n, adjust=False).mean() / tr_smooth.replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    return dx.ewm(alpha=1 / n, adjust=False).mean().fillna(0.0)
 
 
 def swings(df: pd.DataFrame, left: int = SWING_LEFT, right: int = SWING_RIGHT):
