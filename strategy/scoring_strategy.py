@@ -289,12 +289,17 @@ def _build_levels(epic: str, det: dict, atr_now: float) -> Optional[dict]:
     else:
         entry = det["confirm_price"]
 
+    # Anchor SL below the lowest structural reference (key level AND wick/swing extreme)
+    # so that a normal retest of the structure doesn't stop out the trade.
+    # SL_BUFFER_ATR (0.4) of breathing room is added beyond the structural anchor.
     if direction == "buy":
-        raw_sl = min(ref_low, entry) - 0.1 * atr_now
-        dist   = entry - raw_sl
+        sl_anchor = min(ref_low, lvl)
+        raw_sl    = sl_anchor - C.SL_BUFFER_ATR * atr_now
+        dist      = entry - raw_sl
     else:
-        raw_sl = max(ref_high, entry) + 0.1 * atr_now
-        dist   = raw_sl - entry
+        sl_anchor = max(ref_high, lvl)
+        raw_sl    = sl_anchor + C.SL_BUFFER_ATR * atr_now
+        dist      = raw_sl - entry
     dist = float(np.clip(dist, cfg["atr_min"] * atr_now, cfg["atr_max"] * atr_now))
     sl   = entry - dist if direction == "buy" else entry + dist
 
