@@ -1,13 +1,13 @@
 """
-scoring_strategy.py — the strategy engine described in the strategy document.
+scoring_strategy.py — the strategy engine (v3).
 
 Pipeline per instrument:
-  1. detect a pattern on the M15 (entry) timeframe   -> Factor 1
-  2. score technical confirmation (RSI/MACD/EMA)      -> Factor 2
-  3. score daily bias (EMA50/200)                     -> Factor 3
-  4. score MA20 alignment on M15                      -> Factor 4
-  5. score session timing (per instrument)            -> Factor 5
-  6. additional factors (round number, volume, vol/chop penalties)
+  1. volatile regime guard  → skip if ATR/price > per-instrument threshold
+  2. detect a pattern on the M15 (entry) timeframe    -> Factor 1
+  3. score technical confirmation (RSI + MACD + EMA20) -> Factor 2
+  4. score daily bias (EMA50/200)                      -> Factor 3
+  5. score session timing (per instrument)             -> Factor 4
+  6. additional factors (round number, volume, choppy ADX<18 penalty)
   -> total score -> WATCH / A+ / nothing
   -> build entry / SL / TP1 / TP2 per pattern type and instrument ATR
 """
@@ -145,7 +145,6 @@ def _detect_sd_rejection(df: pd.DataFrame, a: pd.Series) -> Optional[dict]:
     h       = float(df["high"].iloc[-1])
     l       = float(df["low"].iloc[-1])
     rng     = max(h - l, 1e-9)
-    body    = abs(c - o)
     upper_wick = h - max(o, c)
     lower_wick = min(o, c) - l
     atr_now    = float(a.iloc[-1])
@@ -230,23 +229,25 @@ _DETECTORS = [_detect_sweep_bos, _detect_reversal, _detect_sd_rejection,
 
 # ── Factor scoring ───────────────────────────────────────────────────
 def _technical_confirmation(df: pd.DataFrame, direction: str) -> tuple[int, list[str]]:
-    close   = df["close"]
-    r       = float(ind.rsi(close).iloc[-1])
+    """Factor 2 — RSI direction + MACD histogram + EMA20 (v3: needs ≥2 of 3)."""
+    close    = df["close"]
+    r        = float(ind.rsi(close).iloc[-1])
     _, _, hist = ind.macd(close)
-    macd_h  = float(hist.iloc[-1])
-    ema50   = float(ind.ema(close, 50).iloc[-1])
-    price   = float(close.iloc[-1])
+    macd_h   = float(hist.iloc[-1])
+    ema20    = float(ind.ema(close, C.EMA_CONFIRM).iloc[-1])
+    price    = float(close.iloc[-1])
     want_buy = direction == "buy"
     agree = []
-    if (r > 50) == want_buy:       agree.append(f"RSI {r:.0f}")
-    if (macd_h > 0) == want_buy:   agree.append("MACD")
-    if (price > ema50) == want_buy: agree.append("EMA50")
+    if (r > 50) == want_buy:           agree.append(f"RSI {r:.0f}")
+    if (macd_h > 0) == want_buy:       agree.append("MACD")
+    if (price > ema20) == want_buy:    agree.append(f"EMA{C.EMA_CONFIRM}")
     k   = len(agree)
     pts = C.CONF_2_OR_3 if k >= 2 else (C.CONF_1 if k == 1 else C.CONF_0)
     return pts, agree
 
 
 def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
+    """Factor 3 — daily EMA50/200 trend direction."""
     close  = daily["close"]
     e50    = float(ind.ema(close, C.EMA_FAST_BIAS).iloc[-1])
     e200   = float(ind.ema(close, C.EMA_SLOW_BIAS).iloc[-1])
@@ -263,27 +264,10 @@ def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
     return C.BIAS_NEUTRAL, "neutral"
 
 
-def _ma20_factor(df: pd.DataFrame, direction: str) -> tuple[int, str]:
-    price = float(df["close"].iloc[-1])
-    ma20  = float(ind.sma(df["close"], C.MA20_PERIOD).iloc[-1])
-    rel   = (price - ma20) / max(price, 1e-9)
-    if abs(rel) < C.MA20_NEUTRAL_BAND:
-        return C.MA20_NEUTRAL, "neutral"
-    aligned = (rel > 0) == (direction == "buy")
-    return (C.MA20_ALIGNED, "aligned") if aligned else (C.MA20_COUNTER, "counter")
-
-
-def _choppy(df: pd.DataFrame, a: pd.Series) -> bool:
-    e     = ind.ema(df["close"], 50)
-    slope = float(e.iloc[-1] - e.iloc[-10]) if len(e) > 10 else 0.0
-    return abs(slope) < 0.5 * float(a.iloc[-1])
-
-
-def _high_atr(a: pd.Series) -> bool:
-    recent = a.dropna().iloc[-100:]
-    if len(recent) < 20:
-        return False
-    return float(a.iloc[-1]) >= float(recent.quantile(C.HIGH_ATR_PCTILE))
+def _choppy(df: pd.DataFrame) -> bool:
+    """True when ADX < threshold — market has no trend (v3: ADX < 18)."""
+    adx_val = float(ind.adx(df).iloc[-1])
+    return adx_val < C.ADX_CHOPPY_THRESHOLD
 
 
 # ── Entry / SL / TP construction ─────────────────────────────────────────────
@@ -337,6 +321,11 @@ class ScoringStrategy:
         if not np.isfinite(atr_now) or atr_now <= 0:
             return None
 
+        # Volatile regime guard (v3): skip setup entirely if ATR/price exceeds threshold
+        price_now = float(df["close"].iloc[-1])
+        if atr_now / max(price_now, 1e-9) > self.cfg["volatile_atr_pct"]:
+            return None
+
         det = next((d for d in (f(df, a) for f in _DETECTORS) if d), None)
         if det is None:
             return None
@@ -346,31 +335,27 @@ class ScoringStrategy:
         reasons: list[str] = []
         comp:    dict      = {}
 
-        # Factor 1
+        # Factor 1 — pattern quality
         f1 = pat["base"] + min(det["bonus"], pat["max_bonus"])
         comp["pattern"] = round(f1, 1)
         reasons.append(f"{pat['label']} ({direction.upper()})")
 
-        # Factor 2
+        # Factor 2 — RSI + MACD + EMA20 (v3)
         f2, agree = _technical_confirmation(df, direction)
         comp["confirmation"] = f2
         if agree:
             reasons.append("Confirm: " + ", ".join(agree))
 
-        # Factor 3
+        # Factor 3 — daily bias
         f3, bias_state = _daily_bias(md.daily, direction)
         comp["daily_bias"] = f3
         reasons.append(f"Daily bias: {bias_state} ({f3:+d})")
 
-        # Factor 4
-        f4, ma_state = _ma20_factor(df, direction)
-        comp["ma20"] = f4
+        # Factor 4 — session timing
+        f4 = session_score(self.cfg["session"], md.now_utc)
+        comp["session"] = f4
 
-        # Factor 5
-        f5 = session_score(self.cfg["session"], md.now_utc)
-        comp["session"] = f5
-
-        # Additional
+        # Additional factors
         add   = 0
         price = float(df["close"].iloc[-1])
         if ind.round_number_near(price, self.cfg["round_step"], self.cfg["round_prox"]):
@@ -380,15 +365,12 @@ class ScoringStrategy:
         if len(vol) >= 2 and float(vol.iloc[-1]) > float(vol.iloc[-2]):
             add += C.VOLUME_CONFIRM_BONUS
             comp["volume_confirm"] = C.VOLUME_CONFIRM_BONUS
-        if _high_atr(a):
-            add += C.HIGH_ATR_PENALTY
-            reasons.append("High volatility (-10)")
-        if _choppy(df, a):
+        if _choppy(df):
             add += C.CHOPPY_PENALTY
-            reasons.append("Choppy market (-10)")
+            reasons.append("Choppy market / low ADX (-10)")
         comp["additional"] = add
 
-        score = int(round(f1 + f2 + f3 + f4 + f5 + add))
+        score = int(round(f1 + f2 + f3 + f4 + add))
         if score < C.WATCH_MIN:
             return None
         tier = "A+" if score >= self.a_plus_threshold else "WATCH"
