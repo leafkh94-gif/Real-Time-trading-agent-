@@ -65,7 +65,7 @@ def atr(df: pd.DataFrame, n: int = ATR_PERIOD) -> pd.Series:
 
 def adx(df: pd.DataFrame, n: int = ADX_PERIOD) -> pd.Series:
     """Average Directional Index — measures trend strength (not direction).
-    ADX < 18 indicates a choppy / directionless market (v3 rule)."""
+    ADX < 20 indicates a choppy / directionless market (v3.1 rule on H1)."""
     high = df["high"]; low = df["low"]
     up_move   = high - high.shift(1)
     down_move = low.shift(1) - low

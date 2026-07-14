@@ -29,7 +29,7 @@ from .market_sessions import session_score
 @dataclass
 class MarketData:
     epic:     str
-    m15:      pd.DataFrame   # columns: open, high, low, close, volume (oldest→newest)
+    h1:       pd.DataFrame   # columns: open, high, low, close, volume (oldest→newest, H1 candles)
     daily:    pd.DataFrame
     now_utc:  dt.datetime
 
@@ -264,7 +264,7 @@ def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
 
 
 def _choppy(df: pd.DataFrame) -> bool:
-    """True when ADX < threshold — market has no trend (v3: ADX < 18)."""
+    """True when ADX < threshold — market has no trend (v3.1: ADX < 20 on H1)."""
     adx_val = float(ind.adx(df).iloc[-1])
     return adx_val < C.ADX_CHOPPY_THRESHOLD
 
@@ -321,7 +321,7 @@ class ScoringStrategy:
         self.a_plus_threshold = a_plus_threshold if a_plus_threshold is not None else C.A_PLUS_BASE
 
     def evaluate(self, md: MarketData) -> Optional[Signal]:
-        df = md.m15
+        df = md.h1
         if df is None or len(df) < 60 or md.daily is None or len(md.daily) < 60:
             return None
         a       = ind.atr(df)

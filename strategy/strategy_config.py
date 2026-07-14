@@ -73,16 +73,16 @@ ADX_PERIOD           = 14
 RSI_PERIOD  = 14
 ATR_PERIOD  = 14
 MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9   # kept — macd() still available in indicators.py
-VWAP_PERIOD = 26   # ~6.5 hours on M15; rolling approximation replaces MACD in Factor 2
+VWAP_PERIOD = 24   # 24 H1 bars ≈ 1 full trading day; rolling approximation replaces MACD in Factor 2
 
 # ── Momentum bonus (v3.1 — disabled pending calibration) ─────────────────────
 MOMENTUM_BONUS         = 3
 MOMENTUM_BONUS_ENABLED = False
 SWING_LEFT, SWING_RIGHT = 3, 3
-SIGNAL_LOOKBACK = 40
+SIGNAL_LOOKBACK = 80   # 80 H1 bars ≈ 3-4 trading days of context
 
-# ── Setup expiry (v3: ~3 hours) ───────────────────────────────────────────────
-SETUP_EXPIRY_MIN = 180
+# ── Setup expiry (H1 trades: 8 hours) ────────────────────────────────────────
+SETUP_EXPIRY_MIN = 480
 
 # ── Session windows (Factor 4) — UTC hours ────────────────────────────────────
 SESSION_TABLES = {
@@ -106,21 +106,25 @@ BTC_WEEKEND_PENALTY  = -4
 # ── Per-instrument configuration ──────────────────────────────────────────────
 # volatile_atr_pct: ATR/price above this → setup skipped entirely (v3 = 1.8% for indices)
 # BTC threshold is higher because crypto ATR naturally exceeds 1.8% of price.
+# ATR min/max are in ATR multiples (H1 timeframe).
+# H1 ATR reference: US500 ≈ 25-45 pts, US100 ≈ 80-150 pts, US30 ≈ 180-350 pts.
+# atr_min=2.0 → US500 min SL ≈ 50-90 pts, US100 ≈ 160-300 pts — in line with user's
+# $50-75 target for US500 and proportionally larger for faster-moving indices.
 INSTRUMENTS = {
     "US500":  {"name": "S&P 500",    "asset": "index",  "session": "index_sp_dow",
-               "atr_max": 2.5, "atr_min": 1.20, "round_step": 50,    "round_prox": 0.0012,
+               "atr_max": 4.0, "atr_min": 2.0, "round_step": 50,    "round_prox": 0.0012,
                "volatile_atr_pct": 0.018,
                "correlated_group": "us_indices", "always_open": False},
     "US30":   {"name": "Dow Jones",  "asset": "index",  "session": "index_sp_dow",
-               "atr_max": 2.5, "atr_min": 1.20, "round_step": 250,   "round_prox": 0.0012,
+               "atr_max": 4.0, "atr_min": 2.0, "round_step": 250,   "round_prox": 0.0012,
                "volatile_atr_pct": 0.018,
                "correlated_group": "us_indices", "always_open": False},
     "US100":  {"name": "Nasdaq 100", "asset": "index",  "session": "index_nasdaq",
-               "atr_max": 2.5, "atr_min": 1.20, "round_step": 100,   "round_prox": 0.0012,
+               "atr_max": 4.0, "atr_min": 2.0, "round_step": 100,   "round_prox": 0.0012,
                "volatile_atr_pct": 0.018,
                "correlated_group": "us_indices", "always_open": False},
     "BTCUSD": {"name": "Bitcoin",    "asset": "crypto", "session": "btc",
-               "atr_max": 3.0, "atr_min": 1.50, "round_step": 1000,  "round_prox": 0.0015,
+               "atr_max": 3.5, "atr_min": 2.0, "round_step": 1000,  "round_prox": 0.0015,
                "volatile_atr_pct": 0.05,          # CALIBRATE — crypto is structurally more volatile
                "correlated_group": None, "always_open": True},
 }
