@@ -41,14 +41,21 @@ CONF_0      = 0
 EMA_CONFIRM = 20    # EMA period for Factor 2 confirmation (v3: EMA20)
 
 # ── Factor 3 — daily bias (EMA50/200) ────────────────────────────────────────
-# BIAS_COUNTER is calibrated so that counter-trend signals can never reach
-# WATCH_MIN even at maximum F1+F2+F4+add (76): 76 + BIAS_COUNTER < WATCH_MIN
-# → -12 gives max counter score of 64 < 68. All counter-trend signals blocked.
-BIAS_ALIGNED  = 15
-BIAS_NEUTRAL  = 5
-BIAS_COUNTER  = -12
+# Continuation patterns (flag, sd_rejection, news_retest) use BIAS_COUNTER:
+#   76 + (-12) = 64 < WATCH_MIN (68) → mathematically impossible to fire counter-trend.
+# Reversal patterns (sweep_bos, reversal) use BIAS_COUNTER_REVERSAL:
+#   76 + (-8) = 68 = WATCH_MIN → only the strongest counter-trend reversals can fire,
+#   and only at WATCH tier (never A+), signalling caution.
+BIAS_ALIGNED          = 15
+BIAS_NEUTRAL          = 5
+BIAS_COUNTER          = -12   # continuation patterns — hard block
+BIAS_COUNTER_REVERSAL = -8    # reversal patterns — allowed with penalty
 EMA_FAST_BIAS = 50
 EMA_SLOW_BIAS = 200
+
+# Patterns allowed to fire counter-trend (with BIAS_COUNTER_REVERSAL penalty).
+# Continuation patterns not in this set are hard-blocked when counter-trend.
+COUNTER_TREND_PATTERNS = frozenset({"sweep_bos", "reversal"})
 
 # ── Additional factors ────────────────────────────────────────────────────────
 ROUND_NUMBER_BONUS   = 5
