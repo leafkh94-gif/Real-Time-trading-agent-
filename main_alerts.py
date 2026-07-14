@@ -41,9 +41,9 @@ def _utcnow() -> _dt.datetime:
 
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-SCAN_INTERVAL_S      = 5 * 60         # scan every 5 min (15m candles update slower)
-ALERT_COOLDOWN_S     = 90 * 60        # 90-min cooldown per market (v3)
-INTER_ALERT_GAP_S    = 30 * 60        # minimum 30 min between any two alerts (v3)
+SCAN_INTERVAL_S      = 30 * 60        # scan every 30 min (H1 candles form every 60 min)
+ALERT_COOLDOWN_S     = 4 * 60 * 60   # 4-hour cooldown per market — H1 trades need room to develop
+INTER_ALERT_GAP_S    = 2 * 60 * 60   # minimum 2 hours between any two alerts
 HEARTBEAT_INTERVAL_S = 24 * 60 * 60
 STATE_FILE           = os.getenv("STATE_FILE", ".bot_state.json")
 
@@ -145,13 +145,12 @@ def _handle_shutdown(sig, frame):  # noqa: ARG001
 
 
 # ── Market data adapter ───────────────────────────────────────────────────────
-# The scoring engine needs M15 (signal/entry timeframe) + DAILY (bias) candles.
+# The scoring engine needs H1 (signal/entry timeframe) + DAILY (bias) candles.
 # >>> INTEGRATION POINT <<<
 # Your CapitalComFeed must expose a method that returns an OHLCV DataFrame with
 # columns: open, high, low, close, volume (oldest -> newest). The Capital.com
 # prices endpoint supports this: GET /prices/{epic}?resolution=...&max=...
-# Resolutions used here: "MINUTE_15" and "DAY".
-# If your feed already has get_h1_m15_candles(), add a sibling get_candles().
+# Resolutions used here: "HOUR" and "DAY".
 def _fetch_df(feed: CapitalComFeed, resolution: str, count: int):
     """Return an OHLCV DataFrame using the feed's existing internals.
 
@@ -164,9 +163,9 @@ def _fetch_df(feed: CapitalComFeed, resolution: str, count: int):
 
 
 def _load_market_data(feed: CapitalComFeed, epic: str, now: _dt.datetime) -> MarketData:
-    m15 = _fetch_df(feed, "MINUTE_15", 220)
+    h1    = _fetch_df(feed, "HOUR", 200)   # ~8 trading days of H1 candles
     daily = _fetch_df(feed, "DAY", 260)
-    return MarketData(epic=epic, m15=m15, daily=daily, now_utc=now)
+    return MarketData(epic=epic, h1=h1, daily=daily, now_utc=now)
 
 
 # ── Alert formatting (Arabic + English technical terms) ────────────────────────
@@ -333,7 +332,7 @@ def main() -> None:
     started = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
     _notify(notifier,
             f"🟡 <b>Alert bot started</b> — <i>{started}</i>\n"
-            "Watching S&amp;P 500, Nasdaq 100, Dow Jones, Bitcoin. Scanning every 5 min.",
+            "Watching S&amp;P 500, Nasdaq 100, Dow Jones, Bitcoin. Scanning every 30 min on H1 candles.",
             f"Alert bot started {started}. Watching US500, US100, US30, BTCUSD.")
     logger.info("Startup notification sent — watching %s", ", ".join(WATCHLIST))
 
