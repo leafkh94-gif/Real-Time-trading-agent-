@@ -1,13 +1,13 @@
 """
-scoring_strategy.py — the strategy engine (v3).
+scoring_strategy.py — the strategy engine (v3.1).
 
 Pipeline per instrument:
   1. volatile regime guard  → skip if ATR/price > per-instrument threshold
   2. detect a pattern on the M15 (entry) timeframe    -> Factor 1
-  3. score technical confirmation (RSI + MACD + EMA20) -> Factor 2
+  3. score technical confirmation (RSI + VWAP + EMA20) -> Factor 2  [v3.1: MACD → VWAP]
   4. score daily bias (EMA50/200)                      -> Factor 3
   5. score session timing (per instrument)             -> Factor 4
-  6. additional factors (round number, volume, choppy ADX<18 penalty)
+  6. additional factors (round number, volume, choppy ADX<20 penalty)
   -> total score -> WATCH / A+ / nothing
   -> build entry / SL / TP1 / TP2 per pattern type and instrument ATR
 """
@@ -229,18 +229,17 @@ _DETECTORS = [_detect_sweep_bos, _detect_reversal, _detect_sd_rejection,
 
 # ── Factor scoring ───────────────────────────────────────────────────
 def _technical_confirmation(df: pd.DataFrame, direction: str) -> tuple[int, list[str]]:
-    """Factor 2 — RSI direction + MACD histogram + EMA20 (v3: needs ≥2 of 3)."""
+    """Factor 2 — RSI direction + VWAP position + EMA20 (v3.1: MACD replaced by VWAP)."""
     close    = df["close"]
     r        = float(ind.rsi(close).iloc[-1])
-    _, _, hist = ind.macd(close)
-    macd_h   = float(hist.iloc[-1])
+    vwap_val = float(ind.vwap(df).iloc[-1])
     ema20    = float(ind.ema(close, C.EMA_CONFIRM).iloc[-1])
     price    = float(close.iloc[-1])
     want_buy = direction == "buy"
     agree = []
-    if (r > 50) == want_buy:           agree.append(f"RSI {r:.0f}")
-    if (macd_h > 0) == want_buy:       agree.append("MACD")
-    if (price > ema20) == want_buy:    agree.append(f"EMA{C.EMA_CONFIRM}")
+    if (r > 50) == want_buy:              agree.append(f"RSI {r:.0f}")
+    if (price > vwap_val) == want_buy:    agree.append("VWAP")
+    if (price > ema20) == want_buy:       agree.append(f"EMA{C.EMA_CONFIRM}")
     k   = len(agree)
     pts = C.CONF_2_OR_3 if k >= 2 else (C.CONF_1 if k == 1 else C.CONF_0)
     return pts, agree

@@ -19,8 +19,8 @@ ADAPT_STEP_DOWN      = 2   # 75 -> 73 -> 71 ...
 ADAPT_STEP_UP        = 1   # raise by 1 on high-signal days (v3)
 
 # ── Daily caps ────────────────────────────────────────────────────────────────
-MAX_A_PLUS_PER_DAY = 3
-MAX_WATCH_PER_DAY  = 3      # cap WATCH alerts to reduce noise
+MAX_A_PLUS_PER_DAY = 5
+MAX_WATCH_PER_DAY  = 10     # v3.1: loosened caps — strategy quality filters are the real gate
 
 # ── Pattern base scores + max bonus (Factor 1) ───────────────────────────────
 # type: "breakout"  -> entry = 50% retrace limit
@@ -64,7 +64,7 @@ CHOPPY_PENALTY       = -10   # applied when ADX < ADX_CHOPPY_THRESHOLD
 
 # ── Market condition guards ───────────────────────────────────────────────────
 # Choppy: ADX below this threshold → penalise score (v3: ADX < 18)
-ADX_CHOPPY_THRESHOLD = 18
+ADX_CHOPPY_THRESHOLD = 20    # v3.1: raised from 18 — stricter choppy-market filter
 ADX_PERIOD           = 14
 # Volatile regime: ATR/price > per-instrument volatile_atr_pct → skip setup entirely (v3: 1.8%)
 # BTC uses a higher limit because crypto is structurally more volatile.
@@ -72,7 +72,12 @@ ADX_PERIOD           = 14
 # ── Indicator parameters ──────────────────────────────────────────────────────
 RSI_PERIOD  = 14
 ATR_PERIOD  = 14
-MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9
+MACD_FAST, MACD_SLOW, MACD_SIGNAL = 12, 26, 9   # kept — macd() still available in indicators.py
+VWAP_PERIOD = 26   # ~6.5 hours on M15; rolling approximation replaces MACD in Factor 2
+
+# ── Momentum bonus (v3.1 — disabled pending calibration) ─────────────────────
+MOMENTUM_BONUS         = 3
+MOMENTUM_BONUS_ENABLED = False
 SWING_LEFT, SWING_RIGHT = 3, 3
 SIGNAL_LOOKBACK = 40
 
