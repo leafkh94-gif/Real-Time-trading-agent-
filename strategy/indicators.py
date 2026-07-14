@@ -8,7 +8,7 @@ import pandas as pd
 
 from .strategy_config import (
     RSI_PERIOD, ATR_PERIOD, ADX_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
-    SWING_LEFT, SWING_RIGHT,
+    SWING_LEFT, SWING_RIGHT, VWAP_PERIOD,
 )
 
 
@@ -36,6 +36,17 @@ def macd(close: pd.Series):
     signal_line = ema(macd_line, MACD_SIGNAL)
     hist        = macd_line - signal_line
     return macd_line, signal_line, hist
+
+
+def vwap(df: pd.DataFrame, period: int = VWAP_PERIOD) -> pd.Series:
+    """Rolling VWAP over `period` bars (directional reference, not a volume indicator).
+    Falls back to a simple price-average when volume is all-zero (e.g. CFD tick volume)."""
+    tp  = (df["high"] + df["low"] + df["close"]) / 3
+    vol = df["volume"].replace(0, np.nan)
+    cum_tp_vol = (tp * vol).rolling(period, min_periods=1).sum()
+    cum_vol    = vol.rolling(period, min_periods=1).sum()
+    result = cum_tp_vol / cum_vol
+    return result.fillna(tp.rolling(period, min_periods=1).mean())
 
 
 def true_range(df: pd.DataFrame) -> pd.Series:
