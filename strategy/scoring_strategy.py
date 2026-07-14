@@ -357,6 +357,14 @@ class ScoringStrategy:
 
         # Factor 3 — daily bias
         f3, bias_state = _daily_bias(md.daily, direction)
+        if bias_state == "counter-trend":
+            if det["pattern"] not in C.COUNTER_TREND_PATTERNS:
+                # Continuation patterns (flag, sd_rejection, news_retest) never fight
+                # the daily trend — skip entirely rather than score low.
+                return None
+            # Reversal patterns may fire counter-trend but with the lighter penalty
+            # so only the strongest setups can reach WATCH_MIN.
+            f3 = C.BIAS_COUNTER_REVERSAL
         comp["daily_bias"] = f3
         reasons.append(f"Daily bias: {bias_state} ({f3:+d})")
 
