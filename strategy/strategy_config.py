@@ -103,19 +103,19 @@ BTC_WEEKEND_PENALTY  = -4
 # BTC threshold is higher because crypto ATR naturally exceeds 1.8% of price.
 INSTRUMENTS = {
     "US500":  {"name": "S&P 500",    "asset": "index",  "session": "index_sp_dow",
-               "atr_max": 1.8, "atr_min": 0.70, "round_step": 50,    "round_prox": 0.0012,
+               "atr_max": 2.5, "atr_min": 1.20, "round_step": 50,    "round_prox": 0.0012,
                "volatile_atr_pct": 0.018,
                "correlated_group": "us_indices", "always_open": False},
     "US30":   {"name": "Dow Jones",  "asset": "index",  "session": "index_sp_dow",
-               "atr_max": 1.8, "atr_min": 0.70, "round_step": 250,   "round_prox": 0.0012,
+               "atr_max": 2.5, "atr_min": 1.20, "round_step": 250,   "round_prox": 0.0012,
                "volatile_atr_pct": 0.018,
                "correlated_group": "us_indices", "always_open": False},
     "US100":  {"name": "Nasdaq 100", "asset": "index",  "session": "index_nasdaq",
-               "atr_max": 2.0, "atr_min": 0.70, "round_step": 100,   "round_prox": 0.0012,
+               "atr_max": 2.5, "atr_min": 1.20, "round_step": 100,   "round_prox": 0.0012,
                "volatile_atr_pct": 0.018,
                "correlated_group": "us_indices", "always_open": False},
     "BTCUSD": {"name": "Bitcoin",    "asset": "crypto", "session": "btc",
-               "atr_max": 2.2, "atr_min": 0.80, "round_step": 1000,  "round_prox": 0.0015,
+               "atr_max": 3.0, "atr_min": 1.50, "round_step": 1000,  "round_prox": 0.0015,
                "volatile_atr_pct": 0.05,          # CALIBRATE — crypto is structurally more volatile
                "correlated_group": None, "always_open": True},
 }
@@ -124,6 +124,7 @@ MIN_RR = 2.0
 
 # ── Stop-loss placement ───────────────────────────────────────────────────────
 # Buffer below (buy) / above (sell) the structural anchor (swing low/high + key level).
-# 0.4 ATR gives enough breathing room so a normal retest doesn't stop out the trade
-# before the move develops. Raise if SL is still hit on retests; lower to tighten RR.
-SL_BUFFER_ATR = 0.4
+# 1.0 ATR gives adequate breathing room beyond the structural level. On M15 S&P 500
+# (ATR ≈ 10 pts) this is ~10 pts of clearance — a single candle range — so normal
+# retests and wicks don't reach the stop before the trade develops.
+SL_BUFFER_ATR = 1.0
