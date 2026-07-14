@@ -8,10 +8,10 @@ before they are trusted (especially everything for BTCUSD).
 from __future__ import annotations
 
 # ── Decision thresholds ───────────────────────────────────────────────────────
-WATCH_MIN      = 62      # 62–74  -> WATCH
-A_PLUS_BASE    = 75      # >=75   -> A+   (this one adapts)
+WATCH_MIN      = 68      # 68–77  -> WATCH  (raised from 62 to reduce noise)
+A_PLUS_BASE    = 78      # >=78   -> A+   (this one adapts)
 A_PLUS_FLOOR   = 65      # adaptive threshold never drops below this
-A_PLUS_CEIL    = 85      # adaptive threshold never rises above this
+A_PLUS_CEIL    = 88      # adaptive threshold never rises above this
 
 # ── Adaptive threshold ────────────────────────────────────────────────────────
 ADAPT_NO_SIGNAL_DAYS = 3   # after N consecutive no-signal days, lower threshold
@@ -19,12 +19,12 @@ ADAPT_STEP_DOWN      = 2   # 75 -> 73 -> 71 ...
 ADAPT_STEP_UP        = 1   # raise by 1 on high-signal days (v3)
 
 # ── Daily caps ────────────────────────────────────────────────────────────────
-MAX_A_PLUS_PER_DAY = 4
-MAX_WATCH_PER_DAY  = None   # None = no cap
+MAX_A_PLUS_PER_DAY = 3
+MAX_WATCH_PER_DAY  = 3      # cap WATCH alerts to reduce noise
 
 # ── Pattern base scores + max bonus (Factor 1) ───────────────────────────────
 # type: "breakout"  -> entry = 50% retrace limit
-#       "rejection" -> entry = confirmation-candle close
+#       "rejection" -> entry = structural level (limit order at key level)
 PATTERNS = {
     "sweep_bos":    {"base": 38, "max_bonus": 10, "type": "breakout",  "label": "Liquidity Sweep + BOS"},
     "sd_rejection": {"base": 37, "max_bonus": 8,  "type": "rejection", "label": "Supply/Demand Rejection"},
@@ -41,9 +41,12 @@ CONF_0      = 0
 EMA_CONFIRM = 20    # EMA period for Factor 2 confirmation (v3: EMA20)
 
 # ── Factor 3 — daily bias (EMA50/200) ────────────────────────────────────────
+# BIAS_COUNTER is calibrated so that counter-trend signals can never reach
+# WATCH_MIN even at maximum F1+F2+F4+add (76): 76 + BIAS_COUNTER < WATCH_MIN
+# → -12 gives max counter score of 64 < 68. All counter-trend signals blocked.
 BIAS_ALIGNED  = 15
 BIAS_NEUTRAL  = 5
-BIAS_COUNTER  = -8
+BIAS_COUNTER  = -12
 EMA_FAST_BIAS = 50
 EMA_SLOW_BIAS = 200
 

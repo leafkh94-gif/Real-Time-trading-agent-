@@ -287,7 +287,11 @@ def _build_levels(epic: str, det: dict, atr_now: float) -> Optional[dict]:
         else:
             entry = half
     else:
-        entry = det["confirm_price"]
+        # Limit entry at the structural level (support for buys, resistance for sells).
+        # Entering at lvl rather than the confirmation-candle close means the user
+        # sets a limit order at the key price, not above (buy) or below (sell) it,
+        # so a normal retest of the structure doesn't push through the entry into SL.
+        entry = lvl
 
     # Anchor SL below the lowest structural reference (key level AND wick/swing extreme)
     # so that a normal retest of the structure doesn't stop out the trade.

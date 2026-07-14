@@ -180,7 +180,7 @@ def _fmt(epic: str, price: float) -> str:
 
 def _entry_label(pattern: str) -> str:
     return ("50% retrace limit" if C.PATTERNS[pattern]["type"] == "breakout"
-            else "confirmation close")
+            else "limit at structure — wait for retest")
 
 
 def _build_message(sig) -> tuple[str, str]:
