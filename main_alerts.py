@@ -31,6 +31,7 @@ load_dotenv()
 from alerts.notifier import NullNotifier, TelegramNotifier
 from core.log_sanitizer import setup_logging
 from strategy.capital_feed import CapitalComFeed
+from strategy import journal
 from strategy import strategy_config as C
 from strategy.scoring_strategy import ScoringStrategy, MarketData
 from strategy.market_sessions import index_market_open, in_news_blackout
@@ -72,6 +73,7 @@ INSTRUMENTS = [_Instrument(e, C.INSTRUMENTS[e]["name"]) for e in WATCHLIST]
 @dataclass
 class BotState:
     day: str = ""
+    week: str = ""                     # ISO year-week of last weekly stats report
     a_plus_today: int = 0
     watch_today: int = 0
     a_plus_threshold: float = C.A_PLUS_BASE
@@ -162,9 +164,20 @@ def _fetch_df(feed: CapitalComFeed, resolution: str, count: int):
     return feed._to_df(candles)
 
 
+def _closed_h1(feed: CapitalComFeed, count: int = 201):
+    """Closed H1 candles only — Capital.com includes the still-forming candle,
+    and a pattern 'confirmed' mid-bar can vanish by candle close (repaint)."""
+    df = _fetch_df(feed, "HOUR", count)
+    return df.iloc[:-1].reset_index(drop=True) if len(df) else df
+
+
 def _load_market_data(feed: CapitalComFeed, epic: str, now: _dt.datetime) -> MarketData:
-    h1    = _fetch_df(feed, "HOUR", 200)   # ~8 trading days of H1 candles
-    daily = _fetch_df(feed, "DAY", 260)
+    # Fetch one extra bar and drop the forming one on both timeframes so
+    # signals only ever fire on closed candles.
+    h1    = _closed_h1(feed)               # ~8 trading days of closed H1 candles
+    daily = _fetch_df(feed, "DAY", 261)
+    if len(daily):
+        daily = daily.iloc[:-1].reset_index(drop=True)
     return MarketData(epic=epic, h1=h1, daily=daily, now_utc=now)
 
 
@@ -260,6 +273,10 @@ def _send_alert(instr, sig, notifier, logger) -> None:
         _notify(notifier, html, plain)
         instr.mark_alerted()
         _last_any_alert = time.time()
+        try:
+            journal.record_signal(sig, _utcnow())
+        except Exception as exc:
+            logger.warning("Journal record failed: %s", exc)
         logger.info("Alert sent: %s %s %s score=%d entry=%s sl=%s",
                     instr.epic, sig.tier, sig.direction.upper(), sig.score,
                     _fmt(instr.epic, sig.entry), _fmt(instr.epic, sig.stop_loss))
@@ -380,6 +397,27 @@ def main() -> None:
                 continue
             _send_alert(instr_by_epic[epic], sig, notifier, logger)
             state.record(sig.tier)
+
+        # Resolve outcomes of past alerts against closed candles (the feedback loop)
+        try:
+            journal.update_outcomes(lambda epic: _closed_h1(feeds[epic]), now)
+        except Exception as exc:
+            logger.warning("Journal outcome update failed: %s", exc)
+
+        # Weekly stats report (fires on the first scan of each new ISO week)
+        iso_week = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]:02d}"
+        if state.week != iso_week:
+            if state.week:                       # skip the very first run ever
+                try:
+                    s = journal.stats()
+                    if s["overall"]["total"]:
+                        report = journal.format_stats(s)
+                        _notify(notifier, "📊 <b>Weekly signal report</b>\n" + report,
+                                "Weekly signal report\n" + report)
+                        logger.info("Weekly stats report sent")
+                except Exception as exc:
+                    logger.warning("Weekly stats failed: %s", exc)
+            state.week = iso_week
 
         _save_state(state)
         _maybe_send_heartbeat(notifier, INSTRUMENTS, logger)

@@ -3,8 +3,11 @@ name: Trading Alert Bot
 # Reliable 24/7 coverage on a PUBLIC repo (unlimited free Actions minutes).
 #
 # How it works:
-#   * Each run executes longterm_bot.py, which scans every 5 min via its
+#   * Each run executes longterm_bot.py, which scans every 30 min via its
 #     internal loop. The runner timeout ends the run; the self-chain restarts it.
+#   * Bot state + signal journal are carried across runs via actions/cache
+#     (cache keys are immutable, so each run saves a fresh key and the next
+#     run restores the newest via the restore-keys prefix).
 #   * At the end of each run a "self-chain" step triggers the next run via
 #     the GitHub API — guaranteed handoff with no gap.
 #   * The schedule cron is a recovery-only watchdog: if the chain ever dies,
@@ -38,6 +41,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore bot state + signal journal
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .bot_state.json
+            signal_journal.json
+          key: bot-state-${{ github.run_id }}
+          restore-keys: bot-state-
+
       - name: Run alert bot
         run: python longterm_bot.py
         env:
@@ -47,6 +59,15 @@ jobs:
           CAPITAL_IDENTIFIER:  ${{ secrets.CAPITAL_IDENTIFIER }}
           CAPITAL_PASSWORD:    ${{ secrets.CAPITAL_PASSWORD }}
           CAPITAL_DEMO:        "true"
+
+      - name: Save bot state + signal journal
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .bot_state.json
+            signal_journal.json
+          key: bot-state-${{ github.run_id }}
 
       - name: Self-chain — queue the next run immediately
         if: always()
