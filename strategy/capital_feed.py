@@ -19,7 +19,7 @@ _LIVE_BASE = "https://api-capital.backend-capital.com/api/v1"
 _PING_INTERVAL = 8 * 60
 _TIMEOUT       = 15
 _LOGIN_RETRIES = 5
-_EMPTY_DF      = pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+_EMPTY_DF      = pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"])
 
 
 class CapitalComFeed:
@@ -63,18 +63,25 @@ class CapitalComFeed:
         return r.json().get("prices", [])
 
     def _to_df(self, prices: list) -> pd.DataFrame:
-        """Convert raw Capital.com price rows to an OHLCV DataFrame."""
+        """Convert raw Capital.com price rows to an OHLCV DataFrame.
+        Includes a naive-UTC 'time' column (candle open time) used by the
+        signal journal to resolve outcomes against post-alert candles."""
         rows = []
         for p in prices:
             def mid(s): return (s["bid"] + s["ask"]) / 2
             rows.append({
+                "time":   p.get("snapshotTimeUTC") or p.get("snapshotTime"),
                 "open":   mid(p["openPrice"]),
                 "high":   mid(p["highPrice"]),
                 "low":    mid(p["lowPrice"]),
                 "close":  mid(p["closePrice"]),
                 "volume": float(p.get("lastTradedVolume", 0)),
             })
-        return pd.DataFrame(rows) if rows else _EMPTY_DF.copy()
+        if not rows:
+            return _EMPTY_DF.copy()
+        df = pd.DataFrame(rows)
+        df["time"] = pd.to_datetime(df["time"], errors="coerce", utc=True).dt.tz_localize(None)
+        return df
 
     # ── Session management ───────────────────────────────────────────────
 
