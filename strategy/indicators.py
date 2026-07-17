@@ -9,6 +9,7 @@ import pandas as pd
 from .strategy_config import (
     RSI_PERIOD, ATR_PERIOD, ADX_PERIOD, MACD_FAST, MACD_SLOW, MACD_SIGNAL,
     SWING_LEFT, SWING_RIGHT, VWAP_PERIOD,
+    VP_LOOKBACK, VP_BINS, VP_VALUE_AREA,
 )
 
 
@@ -47,6 +48,56 @@ def vwap(df: pd.DataFrame, period: int = VWAP_PERIOD) -> pd.Series:
     cum_vol    = vol.rolling(period, min_periods=1).sum()
     result = cum_tp_vol / cum_vol
     return result.fillna(tp.rolling(period, min_periods=1).mean())
+
+
+def anchored_vwap(df: pd.DataFrame, anchor_idx: int) -> pd.Series:
+    """VWAP anchored at a specific bar (e.g. the most recent major swing).
+    Cumulative from the anchor forward — the classic order-flow reference:
+    price above it means the average participant since the anchor is long in profit.
+    Falls back to an expanding price-average when volume is all-zero."""
+    sub = df.iloc[max(0, anchor_idx):]
+    tp  = (sub["high"] + sub["low"] + sub["close"]) / 3
+    vol = sub["volume"].replace(0, np.nan)
+    result = (tp * vol).cumsum() / vol.cumsum()
+    return result.fillna(tp.expanding().mean())
+
+
+def volume_profile(df: pd.DataFrame, lookback: int = VP_LOOKBACK,
+                   bins: int = VP_BINS, va_pct: float = VP_VALUE_AREA):
+    """Volume profile over the last `lookback` bars: POC + value area.
+    Each bar's volume is spread uniformly across the price bins its range covers.
+    NOTE: on CFD feeds volume is tick count — treat the result as an
+    approximation of activity concentration, not true traded volume.
+    Returns {"poc", "vah", "val"} or None if the range is degenerate."""
+    sub = df.iloc[-lookback:]
+    lo  = float(sub["low"].min())
+    hi  = float(sub["high"].max())
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+        return None
+    edges    = np.linspace(lo, hi, bins + 1)
+    vol_bins = np.zeros(bins)
+    lows  = sub["low"].to_numpy()
+    highs = sub["high"].to_numpy()
+    vols  = sub["volume"].to_numpy(dtype=float)
+    for i in range(len(sub)):
+        b_lo = min(bins - 1, max(0, int(np.searchsorted(edges, lows[i],  side="right")) - 1))
+        b_hi = min(bins - 1, max(0, int(np.searchsorted(edges, highs[i], side="right")) - 1))
+        v = vols[i] if vols[i] > 0 else 1.0     # tick volume can be 0 — count the bar itself
+        vol_bins[b_lo:b_hi + 1] += v / (b_hi - b_lo + 1)
+    poc_i = int(vol_bins.argmax())
+    poc   = float((edges[poc_i] + edges[poc_i + 1]) / 2)
+    # Expand the value area from the POC, always absorbing the heavier neighbour.
+    total   = float(vol_bins.sum())
+    covered = vol_bins[poc_i]
+    lo_i = hi_i = poc_i
+    while covered < va_pct * total and (lo_i > 0 or hi_i < bins - 1):
+        below = vol_bins[lo_i - 1] if lo_i > 0 else -1.0
+        above = vol_bins[hi_i + 1] if hi_i < bins - 1 else -1.0
+        if above >= below:
+            hi_i += 1; covered += vol_bins[hi_i]
+        else:
+            lo_i -= 1; covered += vol_bins[lo_i]
+    return {"poc": poc, "vah": float(edges[hi_i + 1]), "val": float(edges[lo_i])}
 
 
 def true_range(df: pd.DataFrame) -> pd.Series:

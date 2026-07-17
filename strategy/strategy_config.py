@@ -8,10 +8,12 @@ before they are trusted (especially everything for BTCUSD).
 from __future__ import annotations
 
 # ── Decision thresholds ───────────────────────────────────────────────────────
-WATCH_MIN      = 68      # 68–77  -> WATCH  (raised from 62 to reduce noise)
-A_PLUS_BASE    = 78      # >=78   -> A+   (this one adapts)
-A_PLUS_FLOOR   = 65      # adaptive threshold never drops below this
-A_PLUS_CEIL    = 88      # adaptive threshold never rises above this
+# v3.2: raised by ~half the new order-flow bonus range (+8 max) so the anchored
+# VWAP / volume profile factors differentiate setups instead of inflating everything.
+WATCH_MIN      = 72      # 72–81  -> WATCH
+A_PLUS_BASE    = 82      # >=82   -> A+   (this one adapts)
+A_PLUS_FLOOR   = 68      # adaptive threshold never drops below this
+A_PLUS_CEIL    = 90      # adaptive threshold never rises above this
 
 # ── Adaptive threshold ────────────────────────────────────────────────────────
 ADAPT_NO_SIGNAL_DAYS = 3   # after N consecutive no-signal days, lower threshold
@@ -41,11 +43,11 @@ CONF_0      = 0
 EMA_CONFIRM = 20    # EMA period for Factor 2 confirmation (v3: EMA20)
 
 # ── Factor 3 — daily bias (EMA50/200) ────────────────────────────────────────
-# Continuation patterns (flag, sd_rejection, news_retest) use BIAS_COUNTER:
-#   76 + (-12) = 64 < WATCH_MIN (68) → mathematically impossible to fire counter-trend.
-# Reversal patterns (sweep_bos, reversal) use BIAS_COUNTER_REVERSAL:
-#   76 + (-8) = 68 = WATCH_MIN → only the strongest counter-trend reversals can fire,
-#   and only at WATCH tier (never A+), signalling caution.
+# Continuation patterns (flag, sd_rejection, news_retest) are hard-blocked
+# counter-trend (explicit `return None` in the engine — BIAS_COUNTER is unused
+# for them beyond documentation). Reversal patterns (sweep_bos, reversal) use
+# BIAS_COUNTER_REVERSAL: only the strongest counter-trend reversals clear
+# WATCH_MIN, signalling caution.
 BIAS_ALIGNED          = 15
 BIAS_NEUTRAL          = 5
 BIAS_COUNTER          = -12   # continuation patterns — hard block
@@ -78,6 +80,21 @@ VWAP_PERIOD = 24   # 24 H1 bars ≈ 1 full trading day; rolling approximation re
 # ── Momentum bonus (v3.1 — disabled pending calibration) ─────────────────────
 MOMENTUM_BONUS         = 3
 MOMENTUM_BONUS_ENABLED = False
+
+# ── Order-flow proxies (v3.2) ─────────────────────────────────────────────────
+# Anchored VWAP: anchored at the most recent opposing swing extreme (swing low
+# for buys, swing high for sells). Price on the correct side means the average
+# participant since that swing is in profit in the trade's direction.
+AVWAP_BONUS = 4
+
+# Volume profile: POC (point of control) + 70% value area over ~1 trading week
+# of H1 bars. NOTE — Capital.com volume is TICK COUNT, not true traded volume,
+# so this is an approximation of where activity concentrated. Kept as a modest
+# bonus, never a hard filter.
+VP_POC_BONUS  = 4     # price on the correct side of POC
+VP_LOOKBACK   = 120   # H1 bars ≈ 1 trading week
+VP_BINS       = 24
+VP_VALUE_AREA = 0.70  # fraction of volume inside the value area
 SWING_LEFT, SWING_RIGHT = 3, 3
 SIGNAL_LOOKBACK = 80   # 80 H1 bars ≈ 3-4 trading days of context
 
