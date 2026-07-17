@@ -1,13 +1,14 @@
 """
-scoring_strategy.py — the strategy engine (v3.1).
+scoring_strategy.py — the strategy engine (v3.2).
 
 Pipeline per instrument:
   1. volatile regime guard  → skip if ATR/price > per-instrument threshold
-  2. detect a pattern on the M15 (entry) timeframe    -> Factor 1
+  2. detect a pattern on the H1 (entry) timeframe     -> Factor 1
   3. score technical confirmation (RSI + VWAP + EMA20) -> Factor 2  [v3.1: MACD → VWAP]
   4. score daily bias (EMA50/200)                      -> Factor 3
   5. score session timing (per instrument)             -> Factor 4
-  6. additional factors (round number, volume, choppy ADX<20 penalty)
+  6. additional factors (round number, volume, choppy ADX<20 penalty,
+     anchored VWAP + volume-profile POC order-flow proxies [v3.2])
   -> total score -> WATCH / A+ / nothing
   -> build entry / SL / TP1 / TP2 per pattern type and instrument ATR
 """
@@ -269,6 +270,19 @@ def _choppy(df: pd.DataFrame) -> bool:
     return adx_val < C.ADX_CHOPPY_THRESHOLD
 
 
+def _anchored_vwap_now(df: pd.DataFrame, direction: str) -> Optional[float]:
+    """Anchored VWAP from the most recent opposing swing extreme:
+    swing low for buys, swing high for sells. Order-flow proxy — price on the
+    correct side means buyers (sells: sellers) have controlled the move since
+    that swing."""
+    highs, lows = ind.swings(df)
+    pivots = lows if direction == "buy" else highs
+    if not pivots:
+        return None
+    anchor_idx = pivots[-1][0]
+    return float(ind.anchored_vwap(df, anchor_idx).iloc[-1])
+
+
 # ── Entry / SL / TP construction ─────────────────────────────────────────────
 def _build_levels(epic: str, det: dict, atr_now: float) -> Optional[dict]:
     cfg       = C.INSTRUMENTS[epic]
@@ -381,6 +395,23 @@ class ScoringStrategy:
         if len(vol) >= 2 and float(vol.iloc[-1]) > float(vol.iloc[-2]):
             add += C.VOLUME_CONFIRM_BONUS
             comp["volume_confirm"] = C.VOLUME_CONFIRM_BONUS
+
+        # Order-flow proxies (v3.2)
+        want_buy = direction == "buy"
+        avwap = _anchored_vwap_now(df, direction)
+        if avwap is not None and (price > avwap) == want_buy:
+            add += C.AVWAP_BONUS
+            comp["anchored_vwap"] = C.AVWAP_BONUS
+            reasons.append(f"Anchored VWAP {'support' if want_buy else 'resistance'} (+{C.AVWAP_BONUS})")
+        vp = ind.volume_profile(df)
+        if vp is not None and (price > vp["poc"]) == want_buy:
+            add += C.VP_POC_BONUS
+            comp["volume_profile"] = C.VP_POC_BONUS
+            side = "above" if want_buy else "below"
+            reasons.append(
+                f"Volume profile: price {side} POC {vp['poc']:,.0f} "
+                f"(VA {vp['val']:,.0f}–{vp['vah']:,.0f}) (+{C.VP_POC_BONUS})")
+
         if _choppy(df):
             add += C.CHOPPY_PENALTY
             reasons.append("Choppy market / low ADX (-10)")
