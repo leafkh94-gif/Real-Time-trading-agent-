@@ -1,0 +1,72 @@
+name: Backtest & Loss Analysis
+
+# Manual only. Replays historical H1 candles through the live scoring engine,
+# resolves every signal with the same fill/TP/SL logic the live journal uses,
+# then runs the loss-anatomy analysis. Results are uploaded as artifacts.
+#
+# This exists because the Capital.com credentials are Actions secrets — the
+# backtest can only reach the price API from inside a workflow run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bars:
+        description: 'H1 bars of history per instrument (1000 ≈ 40 trading days)'
+        required: false
+        default: '1000'
+      min_n:
+        description: 'Minimum decided trades before a dimension counts as a finding'
+        required: false
+        default: '20'
+      epics:
+        description: 'Instruments, space separated (blank = all)'
+        required: false
+        default: ''
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run backtest
+        env:
+          CAPITAL_API_KEY:    ${{ secrets.CAPITAL_API_KEY }}
+          CAPITAL_IDENTIFIER: ${{ secrets.CAPITAL_IDENTIFIER }}
+          CAPITAL_PASSWORD:   ${{ secrets.CAPITAL_PASSWORD }}
+          CAPITAL_DEMO:       "true"
+        run: |
+          python backtest.py ${{ github.event.inputs.epics }} \
+            --bars "${{ github.event.inputs.bars }}" \
+            --out backtest_entries.json | tee backtest_report.txt
+
+      - name: Verify excursion invariants
+        run: python analyze_journal.py backtest_entries.json --selftest | tee -a backtest_report.txt
+
+      - name: Analyse losses
+        run: |
+          python analyze_journal.py backtest_entries.json \
+            --min-n "${{ github.event.inputs.min_n }}" | tee -a backtest_report.txt
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-${{ github.run_id }}
+          path: |
+            backtest_entries.json
+            backtest_report.txt
+          retention-days: 90
+          if-no-files-found: warn

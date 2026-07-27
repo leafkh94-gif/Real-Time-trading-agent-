@@ -404,14 +404,19 @@ def main() -> None:
         except Exception as exc:
             logger.warning("Journal outcome update failed: %s", exc)
 
-        # Weekly stats report (fires on the first scan of each new ISO week)
+        # Weekly stats report (fires on the first scan of each new ISO week).
+        # Reports the 7-day cohort AND cumulative: the recent window is biased
+        # downward because losers resolve at 1R while winners need 2-3R.
         iso_week = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]:02d}"
         if state.week != iso_week:
             if state.week:                       # skip the very first run ever
                 try:
-                    s = journal.stats()
-                    if s["overall"]["total"]:
-                        report = journal.format_stats(s)
+                    entries = journal.load()
+                    if entries:
+                        last7 = journal.stats(entries, since=now - _dt.timedelta(days=7))
+                        cum   = journal.stats(entries)
+                        report = ("<b>Last 7 days</b>\n" + journal.format_stats(last7)
+                                  + "\n\n<b>All time</b>\n" + journal.format_stats(cum))
                         _notify(notifier, "📊 <b>Weekly signal report</b>\n" + report,
                                 "Weekly signal report\n" + report)
                         logger.info("Weekly stats report sent")
