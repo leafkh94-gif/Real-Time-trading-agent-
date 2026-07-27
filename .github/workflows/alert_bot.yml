@@ -69,6 +69,21 @@ jobs:
             signal_journal.json
           key: bot-state-${{ github.run_id }}
 
+      # Cache is the only persistence path and evicts after 7 idle days.
+      # The artifact makes the journal downloadable and recoverable by hand —
+      # it does NOT make it durable. Artifact names must be unique: v4 errors
+      # on duplicates and this workflow self-chains continuously.
+      - name: Upload journal for offline analysis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: journal-${{ github.run_id }}
+          path: |
+            signal_journal.json
+            .bot_state.json
+          retention-days: 90
+          if-no-files-found: warn
+
       - name: Self-chain — queue the next run immediately
         if: always()
         run: |

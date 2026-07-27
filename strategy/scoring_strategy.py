@@ -23,7 +23,7 @@ import pandas as pd
 
 from . import indicators as ind
 from . import strategy_config as C
-from .market_sessions import session_score
+from .market_sessions import session_score, session_label
 
 
 # ── Data contract ──────────────────────────────────────────────────
@@ -50,7 +50,8 @@ class Signal:
     take_profit2:  float
     rr:            float
     reasons:       list[str] = field(default_factory=list)
-    components:    dict       = field(default_factory=dict)
+    components:    dict       = field(default_factory=dict)   # score contributions only
+    context:       dict       = field(default_factory=dict)   # raw market state (diagnostics)
     expiry_utc:    Optional[dt.datetime] = None
 
 
@@ -229,8 +230,12 @@ _DETECTORS = [_detect_sweep_bos, _detect_reversal, _detect_sd_rejection,
 
 
 # ── Factor scoring ───────────────────────────────────────────────────
-def _technical_confirmation(df: pd.DataFrame, direction: str) -> tuple[int, list[str]]:
-    """Factor 2 — RSI direction + VWAP position + EMA20 (v3.1: MACD replaced by VWAP)."""
+def _technical_confirmation(df: pd.DataFrame, direction: str) -> tuple[int, list[str], dict]:
+    """Factor 2 — RSI direction + VWAP position + EMA20 (v3.1: MACD replaced by VWAP).
+
+    Third return value carries the raw indicator readings for the journal —
+    scoring behaviour is unchanged.
+    """
     close    = df["close"]
     r        = float(ind.rsi(close).iloc[-1])
     vwap_val = float(ind.vwap(df).iloc[-1])
@@ -243,7 +248,9 @@ def _technical_confirmation(df: pd.DataFrame, direction: str) -> tuple[int, list
     if (price > ema20) == want_buy:       agree.append(f"EMA{C.EMA_CONFIRM}")
     k   = len(agree)
     pts = C.CONF_2_OR_3 if k >= 2 else (C.CONF_1 if k == 1 else C.CONF_0)
-    return pts, agree
+    raw = {"rsi": round(r, 2), "vwap": round(vwap_val, 2),
+           "ema20": round(ema20, 2), "price": round(price, 2)}
+    return pts, agree, raw
 
 
 def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
@@ -264,10 +271,11 @@ def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
     return C.BIAS_NEUTRAL, "neutral"
 
 
-def _choppy(df: pd.DataFrame) -> bool:
-    """True when ADX < threshold — market has no trend (v3.1: ADX < 20 on H1)."""
+def _choppy(df: pd.DataFrame) -> tuple[bool, float]:
+    """(is_choppy, adx_value). Choppy when ADX < threshold (v3.1: ADX < 20 on H1).
+    Returns the ADX reading so callers don't recompute it for the journal."""
     adx_val = float(ind.adx(df).iloc[-1])
-    return adx_val < C.ADX_CHOPPY_THRESHOLD
+    return adx_val < C.ADX_CHOPPY_THRESHOLD, adx_val
 
 
 def _anchored_vwap_now(df: pd.DataFrame, direction: str) -> Optional[float]:
@@ -317,14 +325,25 @@ def _build_levels(epic: str, det: dict, atr_now: float) -> Optional[dict]:
         sl_anchor = max(ref_high, lvl)
         raw_sl    = sl_anchor + C.SL_BUFFER_ATR * atr_now
         dist      = raw_sl - entry
-    dist = float(np.clip(dist, cfg["atr_min"] * atr_now, cfg["atr_max"] * atr_now))
+    # Record whether the ATR band overrode the structural stop distance.
+    # "min" = structure wanted a TIGHTER stop and config widened it;
+    # "max" = structure wanted a WIDER stop and config cut it short — the direct
+    # mechanical cause of a "stop was too tight" loss.
+    raw_dist = dist
+    lo, hi   = cfg["atr_min"] * atr_now, cfg["atr_max"] * atr_now
+    dist     = float(np.clip(dist, lo, hi))
+    sl_clip  = "min" if raw_dist < lo - 1e-9 else ("max" if raw_dist > hi + 1e-9 else "none")
     sl   = entry - dist if direction == "buy" else entry + dist
 
     tp1 = entry + dist * C.MIN_RR       if direction == "buy" else entry - dist * C.MIN_RR
     tp2 = entry + dist * (C.MIN_RR + 1) if direction == "buy" else entry - dist * (C.MIN_RR + 1)
     rr  = abs(tp1 - entry) / max(abs(entry - sl), 1e-9)
     return {"entry": entry, "stop_loss": sl, "take_profit": tp1,
-            "take_profit2": tp2, "rr": rr}
+            "take_profit2": tp2, "rr": rr,
+            "_diag": {"sl_clip": sl_clip,
+                      "raw_sl_dist_atr": round(raw_dist / max(atr_now, 1e-9), 3),
+                      "entry_dist_atr": round(abs(entry - det["confirm_price"])
+                                              / max(atr_now, 1e-9), 3)}}
 
 
 # ── Engine ───────────────────────────────────────────────────────────
@@ -359,11 +378,14 @@ class ScoringStrategy:
 
         # Factor 1 — pattern quality
         f1 = pat["base"] + min(det["bonus"], pat["max_bonus"])
-        comp["pattern"] = round(f1, 1)
+        # Full precision, not round(f1, 1): the score is computed from the
+        # unrounded value, so rounding here would break the invariant
+        # score == round(sum(components)) whenever the sum lands near .5.
+        comp["pattern"] = round(f1, 6)
         reasons.append(f"{pat['label']} ({direction.upper()})")
 
-        # Factor 2 — RSI + MACD + EMA20 (v3)
-        f2, agree = _technical_confirmation(df, direction)
+        # Factor 2 — RSI + VWAP + EMA20 (v3.1)
+        f2, agree, conf_raw = _technical_confirmation(df, direction)
         comp["confirmation"] = f2
         if agree:
             reasons.append("Confirm: " + ", ".join(agree))
@@ -385,35 +407,60 @@ class ScoringStrategy:
         f4 = session_score(self.cfg["session"], md.now_utc)
         comp["session"] = f4
 
-        # Additional factors
+        # Additional factors.
+        # Every sub-key is written unconditionally (0 when inactive) so that
+        # "absent" and "zero" are distinguishable downstream — a conditional key
+        # makes the journal unanalysable.
         add   = 0
         price = float(df["close"].iloc[-1])
+
+        comp["round_number"] = 0
         if ind.round_number_near(price, self.cfg["round_step"], self.cfg["round_prox"]):
             add += C.ROUND_NUMBER_BONUS
+            comp["round_number"] = C.ROUND_NUMBER_BONUS
             reasons.append("Near round number (+5)")
+
+        comp["volume_confirm"] = 0
         vol = df["volume"]
         if len(vol) >= 2 and float(vol.iloc[-1]) > float(vol.iloc[-2]):
             add += C.VOLUME_CONFIRM_BONUS
             comp["volume_confirm"] = C.VOLUME_CONFIRM_BONUS
 
-        # Order-flow proxies (v3.2)
+        # Order-flow proxies (v3.2). State is three-valued because a score of 0
+        # conflates "no swing pivot existed" with "price on the wrong side".
         want_buy = direction == "buy"
+        comp["anchored_vwap"] = 0
         avwap = _anchored_vwap_now(df, direction)
-        if avwap is not None and (price > avwap) == want_buy:
+        if avwap is None:
+            avwap_state = "unavailable"
+        elif (price > avwap) == want_buy:
+            avwap_state = "aligned"
             add += C.AVWAP_BONUS
             comp["anchored_vwap"] = C.AVWAP_BONUS
             reasons.append(f"Anchored VWAP {'support' if want_buy else 'resistance'} (+{C.AVWAP_BONUS})")
+        else:
+            avwap_state = "opposed"
+
+        comp["volume_profile"] = 0
         vp = ind.volume_profile(df)
-        if vp is not None and (price > vp["poc"]) == want_buy:
+        if vp is None:
+            vp_state = "unavailable"
+        elif (price > vp["poc"]) == want_buy:
+            vp_state = "aligned"
             add += C.VP_POC_BONUS
             comp["volume_profile"] = C.VP_POC_BONUS
             side = "above" if want_buy else "below"
             reasons.append(
                 f"Volume profile: price {side} POC {vp['poc']:,.0f} "
                 f"(VA {vp['val']:,.0f}–{vp['vah']:,.0f}) (+{C.VP_POC_BONUS})")
+        else:
+            vp_state = "opposed"
 
-        if _choppy(df):
+        comp["choppy"] = 0
+        is_choppy, adx_val = _choppy(df)
+        if is_choppy:
             add += C.CHOPPY_PENALTY
+            comp["choppy"] = C.CHOPPY_PENALTY
             reasons.append("Choppy market / low ADX (-10)")
         comp["additional"] = add
 
@@ -425,13 +472,38 @@ class ScoringStrategy:
         levels = _build_levels(self.epic, det, atr_now)
         if levels is None:
             return None
+        diag = levels.pop("_diag")
         if tier == "A+" and levels["rr"] < C.MIN_RR - 1e-6:
             tier = "WATCH"
+
+        # Raw market state at signal time — never used for scoring, only so the
+        # journal can later explain WHY a trade won or lost.
+        context = {
+            "bias_state":       bias_state,
+            "adx":              round(adx_val, 2),
+            "atr":              round(atr_now, 4),
+            "atr_pct":          round(atr_now / max(price_now, 1e-9), 5),
+            "price_at_signal":  round(price_now, 4),
+            "confirm_agree":    list(agree),
+            "confirm_count":    len(agree),
+            "avwap_state":      avwap_state,
+            "vp_state":         vp_state,
+            "session_profile":  self.cfg["session"],
+            "session_label":    session_label(self.cfg["session"], md.now_utc),
+            "hour_utc":         md.now_utc.hour,
+            "weekday":          md.now_utc.weekday(),
+            "pattern_bonus":    round(float(det["bonus"]), 3),
+            "broken_level":     round(float(det["broken_level"]), 4),
+            "confirm_price":    round(float(det["confirm_price"]), 4),
+            "a_plus_threshold": self.a_plus_threshold,
+            **diag,
+            **conf_raw,
+        }
 
         expiry = md.now_utc + dt.timedelta(minutes=C.SETUP_EXPIRY_MIN)
         return Signal(
             epic=self.epic, name=self.cfg["name"], direction=direction,
             pattern=det["pattern"], pattern_label=pat["label"],
             score=score, tier=tier, reasons=reasons, components=comp,
-            expiry_utc=expiry, **levels,
+            context=context, expiry_utc=expiry, **levels,
         )

@@ -9,3 +9,4 @@ __pycache__/
 backtest_results/
 .pytest_cache/
 *.db
+backtest_entries.json

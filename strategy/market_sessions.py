@@ -48,6 +48,31 @@ def session_score(epic_session: str, now_utc: dt.datetime) -> int:
     return 0
 
 
+def session_label(epic_session: str, now_utc: dt.datetime) -> str:
+    """Name of the session that `session_score` matched — for diagnostics.
+
+    Mirrors session_score's branching exactly. A 3-4 level label is analysable;
+    the raw UTC hour is a 24-level dimension that needs far more samples.
+    """
+    t  = now_utc.time()
+    wd = now_utc.weekday()
+
+    if epic_session == "btc":
+        if wd >= 5:
+            return "btc_weekend"
+        if _et_between(now_utc, (9, 30), (16, 0)):
+            return "btc_us_overlap"
+        if _in_window(t, (7, 0), (13, 30)):
+            return "btc_europe"
+        return "btc_asia"
+
+    names = {(12, 30): "new_york", (7, 0): "london", (0, 0): "asia"}
+    for start, end, _pts in SESSION_TABLES.get(epic_session, []):
+        if _in_window(t, start, end):
+            return names.get(tuple(start), f"{start[0]:02d}{start[1]:02d}")
+    return "off_hours"
+
+
 def _et_between(now_utc: dt.datetime, start_et: tuple[int, int], end_et: tuple[int, int]) -> bool:
     et = now_utc.replace(tzinfo=dt.timezone.utc).astimezone(_ET)
     return dt.time(*start_et) <= et.time() < dt.time(*end_et)
