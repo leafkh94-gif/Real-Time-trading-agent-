@@ -190,7 +190,9 @@ def _fmt(epic: str, price: float) -> str:
     return f"{price:,.{dec}f}"
 
 
-def _entry_label(pattern: str) -> str:
+def _entry_label(epic: str, pattern: str) -> str:
+    if C.INSTRUMENTS[epic].get("entry_mode", "retrace_limit") == "bos_close":
+        return "market — enter now at BOS close"
     return ("50% retrace limit" if C.PATTERNS[pattern]["type"] == "breakout"
             else "limit at structure — wait for retest")
 
@@ -205,7 +207,7 @@ def _build_message(sig) -> tuple[str, str]:
         f"{tier_icon}  |  {emoji} <b>{dir_label} — {sig.name}</b>  |  score {sig.score}",
         _SEP,
         f"Pattern : {sig.pattern_label}",
-        f"Entry   : <b>{f(sig.entry)}</b>  ({_entry_label(sig.pattern)})",
+        f"Entry   : <b>{f(sig.entry)}</b>  ({_entry_label(sig.epic, sig.pattern)})",
         f"SL      : <b>{f(sig.stop_loss)}</b>",
         f"TP1     : <b>{f(sig.take_profit)}</b>   (R:R {sig.rr:.1f})",
         f"TP2     : <b>{f(sig.take_profit2)}</b>",

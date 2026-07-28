@@ -123,7 +123,17 @@ def main() -> None:
                     help="H1 bars of history per instrument (default 1000 ≈ 40 trading days)")
     ap.add_argument("--out", default=os.getenv("BACKTEST_OUT", "backtest_entries.json"),
                     help="where to write the entries dump for analyze_journal.py")
+    ap.add_argument("--entry-mode", choices=C.ENTRY_MODES, default=None,
+                    help="force an entry mode on every instrument, overriding "
+                         "their config — run once per mode over the same --bars "
+                         "to compare them on identical history")
     args = ap.parse_args()
+
+    if args.entry_mode:
+        for _cfg in C.INSTRUMENTS.values():
+            _cfg["entry_mode"] = args.entry_mode
+        print(f"ENTRY MODE OVERRIDE: all instruments forced to "
+              f"'{args.entry_mode}' for this run.\n")
 
     epics = [e for e in args.epics if e in C.INSTRUMENTS] or list(C.INSTRUMENTS)
     cap_key, cap_id, cap_pw = (os.getenv("CAPITAL_API_KEY", ""),
@@ -136,7 +146,10 @@ def main() -> None:
     print("NOTE: backtest signals bypass the news blackout, cooldown, inter-alert\n"
           "      gap, correlation filter and daily caps — they are a SUPERSET of\n"
           "      what the live bot would have alerted. Good for diagnosing which\n"
-          "      contexts win; misleading as an absolute expectancy.\n")
+          "      contexts win; misleading as an absolute expectancy.\n"
+          "      'bos_close' entries are modelled as filling at exactly the\n"
+          "      confirmation close. A real market entry is taken minutes later,\n"
+          "      so those fills are OPTIMISTIC by roughly the intervening move.\n")
 
     all_entries: list[dict] = []
     for epic in epics:
