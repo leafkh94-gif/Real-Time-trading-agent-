@@ -120,6 +120,22 @@ BTC_EUROPE_BONUS     = 3
 BTC_ASIA_BONUS       = 2
 BTC_WEEKEND_PENALTY  = -4
 
+# ── Entry mode ────────────────────────────────────────────────────────────────
+# "bos_close"     -> enter immediately at the confirmation candle's close
+#                    (market order, no waiting). Applies to ALL five patterns on
+#                    that instrument, not just sweep_bos — every detector emits
+#                    a confirm_price. Fixes setups expiring unfilled, at the cost
+#                    of a worse average entry price.
+# "retrace_limit" -> original behaviour: breakout patterns wait for a 50%
+#                    retrace, rejection patterns place a limit at the structural
+#                    level. Better fills, but a quarter of setups never fill.
+#
+# NOTE: with "bos_close" the entry sits further from the structural stop anchor,
+# so `dist` grows and the atr_max clip fires much more often. When it does, the
+# stop is placed by this config rather than by market structure — watch the
+# `sl_clip` field in the journal ("max" means the structural stop was cut short).
+ENTRY_MODES = ("bos_close", "retrace_limit")
+
 # ── Per-instrument configuration ──────────────────────────────────────────────
 # volatile_atr_pct: ATR/price above this → setup skipped entirely (v3 = 1.8% for indices)
 # BTC threshold is higher because crypto ATR naturally exceeds 1.8% of price.
@@ -127,22 +143,27 @@ BTC_WEEKEND_PENALTY  = -4
 # H1 ATR reference: US500 ≈ 25-45 pts, US100 ≈ 80-150 pts, US30 ≈ 180-350 pts.
 # atr_min=2.0 → US500 min SL ≈ 50-90 pts, US100 ≈ 160-300 pts — in line with user's
 # $50-75 target for US500 and proportionally larger for faster-moving indices.
+#
+# entry_mode: US indices use "bos_close" (they move too fast for a retrace to be
+# reachable in practice). BTCUSD stays on "retrace_limit" as a control group, so
+# the two modes can be compared on live data rather than assumed.
 INSTRUMENTS = {
     "US500":  {"name": "S&P 500",    "asset": "index",  "session": "index_sp_dow",
                "atr_max": 4.0, "atr_min": 2.0, "round_step": 50,    "round_prox": 0.0012,
-               "volatile_atr_pct": 0.018,
+               "volatile_atr_pct": 0.018, "entry_mode": "bos_close",
                "correlated_group": "us_indices", "always_open": False},
     "US30":   {"name": "Dow Jones",  "asset": "index",  "session": "index_sp_dow",
                "atr_max": 4.0, "atr_min": 2.0, "round_step": 250,   "round_prox": 0.0012,
-               "volatile_atr_pct": 0.018,
+               "volatile_atr_pct": 0.018, "entry_mode": "bos_close",
                "correlated_group": "us_indices", "always_open": False},
     "US100":  {"name": "Nasdaq 100", "asset": "index",  "session": "index_nasdaq",
                "atr_max": 4.0, "atr_min": 2.0, "round_step": 100,   "round_prox": 0.0012,
-               "volatile_atr_pct": 0.018,
+               "volatile_atr_pct": 0.018, "entry_mode": "bos_close",
                "correlated_group": "us_indices", "always_open": False},
     "BTCUSD": {"name": "Bitcoin",    "asset": "crypto", "session": "btc",
                "atr_max": 3.5, "atr_min": 2.0, "round_step": 1000,  "round_prox": 0.0015,
                "volatile_atr_pct": 0.05,          # CALIBRATE — crypto is structurally more volatile
+               "entry_mode": "retrace_limit",     # control group for the A/B
                "correlated_group": None, "always_open": True},
 }
 

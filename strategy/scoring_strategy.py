@@ -299,7 +299,13 @@ def _build_levels(epic: str, det: dict, atr_now: float) -> Optional[dict]:
     lvl       = det["broken_level"]
     ref_low, ref_high = det["ref_low"], det["ref_high"]
 
-    if ptype == "breakout":
+    mode = cfg.get("entry_mode", "retrace_limit")
+    if mode == "bos_close":
+        # Immediate entry at the confirmation candle's close — no limit order and
+        # no waiting for a retrace that may never come. Applies to every pattern:
+        # all five detectors emit confirm_price.
+        entry = float(det["confirm_price"])
+    elif ptype == "breakout":
         extreme = ref_high if direction == "buy" else ref_low
         half    = (lvl + 0.5 * (extreme - lvl) if direction == "buy"
                    else lvl - 0.5 * (lvl - extreme))
@@ -341,6 +347,7 @@ def _build_levels(epic: str, det: dict, atr_now: float) -> Optional[dict]:
     return {"entry": entry, "stop_loss": sl, "take_profit": tp1,
             "take_profit2": tp2, "rr": rr,
             "_diag": {"sl_clip": sl_clip,
+                      "entry_mode": mode,
                       "raw_sl_dist_atr": round(raw_dist / max(atr_now, 1e-9), 3),
                       "entry_dist_atr": round(abs(entry - det["confirm_price"])
                                               / max(atr_now, 1e-9), 3)}}
