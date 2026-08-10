@@ -71,6 +71,11 @@ jobs:
           python analyze_journal.py backtest_entries.json \
             --min-n "${{ github.event.inputs.min_n }}" | tee -a backtest_report.txt
 
+      - name: Per-trade excursion table
+        run: |
+          python analyze_journal.py backtest_entries.json --table \
+            | tee -a backtest_report.txt
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4

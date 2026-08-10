@@ -422,6 +422,18 @@ def main() -> None:
                         _notify(notifier, "📊 <b>Weekly signal report</b>\n" + report,
                                 "Weekly signal report\n" + report)
                         logger.info("Weekly stats report sent")
+
+                        # Per-trade detail. The aggregate hides which trades ran
+                        # into profit and by how much, and the journal file is
+                        # otherwise trapped on the runner — send it and log it.
+                        rows = journal.trade_rows(entries, statuses={"sl_hit"})
+                        if rows:
+                            table = journal.format_trade_table(
+                                rows, "Losses that moved into profit:")
+                            _notify(notifier,
+                                    "🔍 <b>Loss detail</b>\n<pre>" + table + "</pre>",
+                                    "Loss detail\n" + table)
+                            logger.info("Per-trade loss table:\n%s", table)
                 except Exception as exc:
                     logger.warning("Weekly stats failed: %s", exc)
             state.week = iso_week

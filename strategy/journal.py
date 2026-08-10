@@ -319,6 +319,61 @@ def stats(entries: list[dict] | None = None,
     return out
 
 
+def trade_rows(entries: list[dict], statuses: frozenset | set | None = None,
+               min_mfe_r: float | None = None,
+               max_mfe_r: float | None = None) -> list[dict]:
+    """Per-trade rows with excursion converted to points as well as R.
+
+    R alone hides the thing traders actually feel: a 0.7R excursion is 49
+    points on one instrument and 210 on another. `mfe_pts = mfe_r * sl_distance`
+    restores that. Entries without excursion data (schema 1) are skipped rather
+    than defaulted to zero.
+    """
+    rows = []
+    for e in entries:
+        if statuses and e.get("status") not in statuses:
+            continue
+        mfe = e.get("mfe_r")
+        if mfe is None:
+            continue
+        if min_mfe_r is not None and mfe < min_mfe_r:
+            continue
+        if max_mfe_r is not None and mfe > max_mfe_r:
+            continue
+        sl_pts = e.get("sl_distance") or abs(e["entry"] - e["stop_loss"])
+        rows.append({
+            "id":        e.get("id", ""),
+            "epic":      e.get("epic", ""),
+            "pattern":   e.get("pattern", ""),
+            "direction": e.get("direction", ""),
+            "alert_utc": e.get("alert_utc", ""),
+            "entry":     e.get("entry"),
+            "stop_loss": e.get("stop_loss"),
+            "sl_pts":    round(sl_pts, 1),
+            "mfe_r":     mfe,
+            "mfe_pts":   round(mfe * sl_pts, 1),
+            "mae_r":     e.get("mae_r"),
+            "status":    e.get("status"),
+        })
+    rows.sort(key=lambda r: r["mfe_pts"], reverse=True)
+    return rows
+
+
+def format_trade_table(rows: list[dict], title: str = "") -> str:
+    """Fixed-width table of per-trade excursions."""
+    if not rows:
+        return (title + "\n" if title else "") + "  (no trades with excursion data)"
+    out = [title] if title else []
+    out.append(f"  {'#':>2} {'market':<7} {'pattern':<13} {'dir':<4} "
+               f"{'entry':>10} {'SL pts':>7} {'MFE R':>6} {'MFE pts':>8} {'outcome':<8}")
+    out.append("  " + "-" * 76)
+    for i, r in enumerate(rows, 1):
+        out.append(f"  {i:>2} {r['epic']:<7} {r['pattern']:<13} {r['direction']:<4} "
+                   f"{r['entry']:>10,.1f} {r['sl_pts']:>7,.1f} {r['mfe_r']:>6.2f} "
+                   f"{r['mfe_pts']:>8,.1f} {r['status']:<8}")
+    return "\n".join(out)
+
+
 def format_stats(s: dict) -> str:
     """Human-readable summary (used for the weekly Telegram report).
 
