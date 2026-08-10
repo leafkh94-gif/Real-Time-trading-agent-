@@ -372,6 +372,13 @@ def main() -> None:
     ap.add_argument("--epic", default=None)
     ap.add_argument("--json", dest="json_out", default=None)
     ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--table", action="store_true",
+                    help="print a per-trade table of losses that moved into "
+                         "profit, in R and in points, instead of the sweep")
+    ap.add_argument("--min-mfe", type=float, default=None,
+                    help="with --table: only trades whose MFE reached this many R")
+    ap.add_argument("--max-mfe", type=float, default=None,
+                    help="with --table: only trades whose MFE stayed below this many R")
     args = ap.parse_args()
 
     paths = args.paths or [journal.JOURNAL_FILE]
@@ -400,6 +407,23 @@ def main() -> None:
     if args.selftest:
         print("\nSELFTEST")
         sys.exit(1 if selftest(df) else 0)
+
+    if args.table:
+        losses = journal.trade_rows(entries, statuses={"sl_hit"},
+                                    min_mfe_r=args.min_mfe, max_mfe_r=args.max_mfe)
+        print("\n" + journal.format_trade_table(
+            losses, "\nLOSSES THAT MOVED INTO PROFIT (sorted by how far they ran)"))
+        if losses:
+            pts = [r["mfe_pts"] for r in losses]
+            print(f"\n  {len(losses)} losing trades listed | "
+                  f"median {sorted(pts)[len(pts)//2]:,.1f} pts | max {max(pts):,.1f} pts")
+            for lo, hi in ((0, 50), (50, 100), (100, 200), (200, 1e9)):
+                n = sum(1 for p in pts if lo <= p < hi)
+                label = f"{lo}-{hi} pts" if hi < 1e9 else f"{lo}+ pts"
+                print(f"    {label:<12} {n:>3}")
+        wins = journal.trade_rows(entries, statuses={"tp1_hit", "tp2_hit"})
+        print("\n" + journal.format_trade_table(wins, "\nWINNERS (for comparison)"))
+        return
 
     section_mfe(df, args.min_n)
     section_counterfactuals(df)

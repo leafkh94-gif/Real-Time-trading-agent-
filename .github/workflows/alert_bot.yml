@@ -59,6 +59,12 @@ jobs:
           CAPITAL_IDENTIFIER:  ${{ secrets.CAPITAL_IDENTIFIER }}
           CAPITAL_PASSWORD:    ${{ secrets.CAPITAL_PASSWORD }}
           CAPITAL_DEMO:        "true"
+          # Exit cleanly after 90 min so the artifact/cache steps actually run.
+          # Without this the loop ran until GitHub killed the job at the 355-min
+          # timeout, which cancels the run — every completed run so far shows
+          # zero executed jobs and uploaded no journal. The self-chain restarts
+          # immediately, so coverage is unaffected.
+          MAX_RUNTIME_S:       "5400"
 
       - name: Save bot state + signal journal
         if: always()
