@@ -46,8 +46,9 @@ class CapitalComFeed:
 
     def get_candles(self, resolution: str, max_count: int = 200) -> pd.DataFrame:
         """
-        Return a DataFrame with columns [open, high, low, close, volume],
-        oldest row first. resolution: 'MINUTE_15', 'HOUR', 'DAY', etc.
+        Return a DataFrame with columns [time, open, high, low, close, volume],
+        **guaranteed oldest row first** (see _to_df — the order is enforced, not
+        assumed). resolution: 'MINUTE_15', 'HOUR', 'DAY', etc.
         """
         try:
             return self._to_df(self._fetch(resolution, max_count))
@@ -81,7 +82,24 @@ class CapitalComFeed:
             return _EMPTY_DF.copy()
         df = pd.DataFrame(rows)
         df["time"] = pd.to_datetime(df["time"], errors="coerce", utc=True).dt.tz_localize(None)
-        return df
+
+        # Guarantee chronological (oldest-first) order. Capital.com documents no
+        # ordering, yet every consumer treats .iloc[-1] as the latest bar and
+        # main_alerts drops .iloc[-1] as the still-forming candle. An unsorted or
+        # reversed response would invert all of that silently — the bot would
+        # analyse the oldest bar as "now" and never notice.
+        unordered = df["time"].isna()
+        if unordered.any():
+            # A row we cannot place in time cannot be trusted: sorted last it
+            # would masquerade as the newest bar. Drop it loudly instead.
+            logger.warning("%s: dropping %d candle(s) with unparseable timestamps",
+                           self._epic, int(unordered.sum()))
+            df = df[~unordered]
+            if df.empty:
+                logger.error("%s: no candle had a usable timestamp — returning "
+                             "empty rather than risk an unordered series", self._epic)
+                return _EMPTY_DF.copy()
+        return df.sort_values("time", kind="stable").reset_index(drop=True)
 
     # ── Session management ───────────────────────────────────────────────
 
