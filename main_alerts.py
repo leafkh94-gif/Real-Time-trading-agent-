@@ -46,6 +46,9 @@ SCAN_INTERVAL_S      = 30 * 60        # scan every 30 min (H1 candles form every
 ALERT_COOLDOWN_S     = 4 * 60 * 60   # 4-hour cooldown per market — H1 trades need room to develop
 INTER_ALERT_GAP_S    = 2 * 60 * 60   # minimum 2 hours between any two alerts
 HEARTBEAT_INTERVAL_S = 24 * 60 * 60
+# The bot restarts every 90 min (MAX_RUNTIME_S) so the journal artifact uploads.
+# Only announce a restart this often — a chained handoff is not news.
+STARTUP_NOTIFY_INTERVAL_S = 12 * 60 * 60
 STATE_FILE           = os.getenv("STATE_FILE", ".bot_state.json")
 
 # Watchlist is driven by the strategy config (single source of truth).
@@ -79,6 +82,12 @@ class BotState:
     a_plus_threshold: float = C.A_PLUS_BASE
     no_signal_streak: int = 0          # consecutive days with zero signals
     cooldowns: dict = field(default_factory=dict)
+    # Notification bookkeeping. These MUST live in persisted state, not in
+    # module globals: the bot now exits every 90 min so the journal uploads,
+    # and anything kept in memory resets on each self-chain handoff — which
+    # turned one startup message per ~6h into one per 90 min.
+    last_start_notify: float = 0.0     # epoch of last "bot started" message
+    last_heartbeat: float = 0.0        # epoch of last daily check-in
 
     def roll_day(self, today: str, logger: logging.Logger) -> None:
         """Apply adaptive-threshold logic when the UTC day changes."""
@@ -232,21 +241,20 @@ def _notify(notifier, html: str, plain: str) -> None:
 
 
 # ── Heartbeat ─────────────────────────────────────────────────────────────────
-_last_heartbeat: float = 0.0
-
-
-def _maybe_send_heartbeat(notifier, instruments, logger) -> None:
-    global _last_heartbeat
-    if time.time() - _last_heartbeat < HEARTBEAT_INTERVAL_S:
+def _maybe_send_heartbeat(notifier, instruments, logger, state) -> None:
+    """Daily 'still running' check-in. Timing lives in persisted state so it
+    survives the 90-minute self-chain handoff — as a module global it fired
+    once per run instead of once per day."""
+    if time.time() - state.last_heartbeat < HEARTBEAT_INTERVAL_S:
         return
     if any(time.time() - i._last_alert < HEARTBEAT_INTERVAL_S for i in instruments):
-        _last_heartbeat = time.time()
+        state.last_heartbeat = time.time()
         return
     markets = ", ".join(i.name for i in instruments)
     html = ("🤖 <b>Alert bot — daily check-in</b>\n"
             f"<i>Watching: {markets}</i>\nNo setups in the last 24h — running normally.")
     _notify(notifier, html, html.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""))
-    _last_heartbeat = time.time()
+    state.last_heartbeat = time.time()
     logger.info("Daily heartbeat sent")
 
 
@@ -348,12 +356,23 @@ def main() -> None:
     _CURRENT_THRESHOLD = state.a_plus_threshold
     strategies = {e: ScoringStrategy(e, a_plus_threshold=state.a_plus_threshold) for e in WATCHLIST}
 
+    # Announce a genuine (re)start, not a routine self-chain handoff. The bot
+    # exits every 90 min so the journal uploads, so notifying unconditionally
+    # meant ~16 identical "started" messages a day. A cold start after a real
+    # outage is still worth knowing about, hence the interval rather than
+    # silence.
     started = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    _notify(notifier,
-            f"🟡 <b>Alert bot started</b> — <i>{started}</i>\n"
-            "Watching S&amp;P 500, Nasdaq 100, Dow Jones, Bitcoin. Scanning every 30 min on H1 candles.",
-            f"Alert bot started {started}. Watching US500, US100, US30, BTCUSD.")
-    logger.info("Startup notification sent — watching %s", ", ".join(WATCHLIST))
+    if time.time() - state.last_start_notify >= STARTUP_NOTIFY_INTERVAL_S:
+        _notify(notifier,
+                f"🟡 <b>Alert bot started</b> — <i>{started}</i>\n"
+                "Watching S&amp;P 500, Nasdaq 100, Dow Jones, Bitcoin. Scanning every 30 min on H1 candles.",
+                f"Alert bot started {started}. Watching US500, US100, US30, BTCUSD.")
+        state.last_start_notify = time.time()
+        _save_state(state)
+        logger.info("Startup notification sent — watching %s", ", ".join(WATCHLIST))
+    else:
+        logger.info("Startup at %s — notification suppressed (chained handoff); "
+                    "watching %s", started, ", ".join(WATCHLIST))
 
     max_runtime_s = int(os.getenv("MAX_RUNTIME_S", "0"))
     start_time = time.time()
@@ -439,7 +458,7 @@ def main() -> None:
             state.week = iso_week
 
         _save_state(state)
-        _maybe_send_heartbeat(notifier, INSTRUMENTS, logger)
+        _maybe_send_heartbeat(notifier, INSTRUMENTS, logger, state)
 
         if max_runtime_s and (time.time() - start_time) >= max_runtime_s:
             logger.info("Max runtime reached — exiting cleanly.")
