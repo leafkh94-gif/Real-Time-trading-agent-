@@ -176,3 +176,55 @@ def test_graduated_still_blocks_when_both_layers_disagree(restore_bias_mode):
 
 def test_correction_penalty_sits_between_neutral_and_counter():
     assert C.BIAS_COUNTER_REVERSAL < C.BIAS_CORRECTION < C.BIAS_NEUTRAL
+
+
+# ── week-1 structural fixes ──────────────────────────────────────────────────
+from strategy.scoring_strategy import _pattern_quality
+
+
+def test_best_pattern_wins_not_first_in_list():
+    """flag (+0.29R measured) must beat reversal (-0.25R) when both fire, and
+    list order must not decide it. reversal sits earlier in _DETECTORS."""
+    weak = {"pattern": "reversal", "bonus": 0.0}      # 37 + 0
+    strong = {"pattern": "flag", "bonus": 8.0}        # 36 + 8 = 44
+    assert _pattern_quality(strong) > _pattern_quality(weak)
+    assert max([weak, strong], key=_pattern_quality) is strong
+
+
+def test_pattern_quality_caps_the_bonus():
+    """A detector reporting an absurd bonus cannot outrank on that alone."""
+    capped = {"pattern": "flag", "bonus": 999.0}
+    assert _pattern_quality(capped) == 36 + C.PATTERNS["flag"]["max_bonus"]
+
+
+def test_far_limit_entries_are_rejected():
+    """Beyond 1.5 ATR the measured fill rate is 0.23 — three in four expire."""
+    far = {"pattern": "sd_rejection", "direction": "buy", "broken_level": 100.0,
+           "ref_low": 95.0, "ref_high": 110.0,
+           "confirm_price": 130.0,      # 3 ATR away from the limit at 100
+           "bonus": 5.0}
+    lv = _build_levels("BTCUSD", far, 10.0)
+    assert lv["_diag"]["entry_dist_atr"] > C.MAX_ENTRY_DIST_ATR
+
+
+def test_near_limit_entries_survive():
+    near = {"pattern": "sd_rejection", "direction": "buy", "broken_level": 100.0,
+            "ref_low": 95.0, "ref_high": 110.0, "confirm_price": 103.0,
+            "bonus": 5.0}
+    lv = _build_levels("BTCUSD", near, 10.0)
+    assert lv["_diag"]["entry_dist_atr"] <= C.MAX_ENTRY_DIST_ATR
+
+
+def test_spread_cost_is_charged_to_expectancy():
+    """A 2R win costs one round-trip spread; net must be below gross."""
+    e = entry(); e["status"] = "tp1_hit"; e["r_realized"] = 2.0; e["spread_r"] = 0.05
+    assert journal.expectancy_r([e]) == pytest.approx(2.0)
+    assert journal.expectancy_r([e], net_of_spread=True) == pytest.approx(1.95)
+
+
+def test_entries_without_a_spread_are_charged_nothing():
+    """Older entries must not be charged a guessed cost — the net figure is
+    then optimistic, which is the honest direction to fail in."""
+    e = entry(); e["status"] = "sl_hit"; e["r_realized"] = -1.0
+    e.pop("spread_r", None)
+    assert journal.expectancy_r([e], net_of_spread=True) == pytest.approx(-1.0)

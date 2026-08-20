@@ -192,6 +192,12 @@ INSTRUMENTS = {
                "correlated_group": None, "always_open": True},
 }
 
+# Limit entries further than this from the confirmation close are dropped.
+# Measured fill rate by distance: <0.5 ATR -> 0.89, 0.5-1.0 -> 0.64,
+# 1.0-1.5 -> 0.74, 1.5+ -> 0.23. Beyond 1.5 ATR the setup expires unfilled
+# roughly three times in four. None disables the check.
+MAX_ENTRY_DIST_ATR = 1.5
+
 MIN_RR = 2.0
 
 # ── Break-even stop ───────────────────────────────────────────────────────────
