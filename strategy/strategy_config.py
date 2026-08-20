@@ -27,8 +27,13 @@ MAX_WATCH_PER_DAY  = 10     # v3.1: loosened caps — strategy quality filters a
 # ── Pattern base scores + max bonus (Factor 1) ───────────────────────────────
 # type: "breakout"  -> entry = 50% retrace limit
 #       "rejection" -> entry = structural level (limit order at key level)
+# "enabled": False keeps the detector and its history intact but stops it
+# producing signals. sweep_bos is disabled on evidence: 0 wins from 6 decided
+# trades in each of three backtest runs (-1.00R expectancy). Small sample, but
+# the highest-scored pattern in the config has never once won.
 PATTERNS = {
-    "sweep_bos":    {"base": 38, "max_bonus": 10, "type": "breakout",  "label": "Liquidity Sweep + BOS"},
+    "sweep_bos":    {"base": 38, "max_bonus": 10, "type": "breakout",  "label": "Liquidity Sweep + BOS",
+                     "enabled": False},
     "sd_rejection": {"base": 37, "max_bonus": 8,  "type": "rejection", "label": "Supply/Demand Rejection"},
     "reversal":     {"base": 37, "max_bonus": 10, "type": "rejection", "label": "Double Top/Bottom / H&S"},
     "flag":         {"base": 36, "max_bonus": 8,  "type": "breakout",  "label": "Bull/Bear Flag"},
@@ -60,7 +65,10 @@ EMA_SLOW_BIAS = 200
 COUNTER_TREND_PATTERNS = frozenset({"sweep_bos", "reversal"})
 
 # ── Additional factors ────────────────────────────────────────────────────────
-ROUND_NUMBER_BONUS   = 5
+# Measured inverted: setups near a round number won 19% vs 38% away from one.
+# Set to 0 rather than deleted — proximity is still recorded in the journal so
+# the factor keeps being measured, it just no longer earns points.
+ROUND_NUMBER_BONUS   = 0
 VOLUME_CONFIRM_BONUS = 3     # optional — CFD tick-volume is unreliable
 CHOPPY_PENALTY       = -10   # applied when ADX < ADX_CHOPPY_THRESHOLD
 
@@ -168,6 +176,16 @@ INSTRUMENTS = {
 }
 
 MIN_RR = 2.0
+
+# ── Break-even stop ───────────────────────────────────────────────────────────
+# Once a trade runs BREAKEVEN_AT_R in favour, the stop moves to the entry price.
+# Measured as the single highest-value change available: it turned expectancy
+# positive in all three backtest runs (-0.137R -> +0.068R on the latest data),
+# because 15 of 52 losses had already reached +1R before reversing into the stop.
+# The bot only alerts, so this is an instruction carried in the message; the
+# journal models it so recorded outcomes match what the trade plan actually says.
+BREAKEVEN_ENABLED = True
+BREAKEVEN_AT_R    = 1.0
 
 # ── Stop-loss placement ───────────────────────────────────────────────────────
 # Buffer below (buy) / above (sell) the structural anchor (swing low/high + key level).

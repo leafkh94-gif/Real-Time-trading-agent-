@@ -79,6 +79,7 @@ def normalize(entries: list[dict]) -> pd.DataFrame:
             "source": e.get("source", "live"),
             "alert_utc": e.get("alert_utc"),
             "outcome": ("win" if st in WIN else "loss" if st == "sl_hit"
+                        else "scratch" if st == "breakeven"
                         else "expired" if st == "expired" else "open"),
             "mfe_r": e.get("mfe_r"), "mae_r": e.get("mae_r"),
             "mfe_r_optimistic": e.get("mfe_r_optimistic"),
@@ -104,7 +105,11 @@ def normalize(entries: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if df.empty:
         return df
+    # Scratches are a real outcome (0R) and belong in expectancy, but a
+    # win-rate sweep that counted them as losses would penalise the very
+    # rule that produced them. Keep them separate.
     df["decided"] = df["outcome"].isin(["win", "loss"])
+    df["settled"] = df["outcome"].isin(["win", "loss", "scratch"])
     df["same_bar"] = df["bars_to_resolve"] == 0
     # How much of a verdict rests on unknowable intrabar ordering.
     df["mfe_ambiguous"] = (df["mfe_r_optimistic"].astype(float)

@@ -26,11 +26,13 @@ from typing import Optional
 
 import pandas as pd
 
+from . import strategy_config as C
+
 logger = logging.getLogger(__name__)
 
 JOURNAL_FILE = os.getenv("JOURNAL_FILE", "signal_journal.json")
 
-FINAL_STATES = frozenset({"sl_hit", "tp1_hit", "tp2_hit", "expired"})
+FINAL_STATES = frozenset({"sl_hit", "tp1_hit", "tp2_hit", "expired", "breakeven"})
 WIN_STATES   = frozenset({"tp1_hit", "tp2_hit"})
 
 _ISO = "%Y-%m-%dT%H:%M:%S"
@@ -73,6 +75,7 @@ def entry_from_signal(sig, now: dt.datetime) -> dict:
         "stop_loss":    sig.stop_loss,
         "take_profit":  sig.take_profit,
         "take_profit2": sig.take_profit2,
+        "breakeven_at": getattr(sig, "breakeven_at", None),
         "alert_utc":    now.strftime(_ISO),
         "expiry_utc":   sig.expiry_utc.strftime(_ISO) if sig.expiry_utc else None,
         "status":       "pending",
@@ -103,6 +106,8 @@ def _realized_r(entry: dict) -> Optional[float]:
     st = entry["status"]
     if st == "sl_hit":
         return -1.0
+    if st == "breakeven":
+        return 0.0        # stop had already moved to entry — scratched, not lost
     if st == "tp1_hit":
         return round(abs(entry["take_profit"] - entry["entry"]) / risk, 3)
     if st == "tp2_hit":
@@ -140,6 +145,7 @@ def resolve(entry: dict, candles: pd.DataFrame) -> dict:
     entry.setdefault("bars_to_resolve", None)
     entry.setdefault("last_bar_utc", None)
     entry.setdefault("r_realized", None)
+    entry.setdefault("be_armed", False)
 
     alert_t  = dt.datetime.strptime(entry["alert_utc"], _ISO)
     expiry_t = (dt.datetime.strptime(entry["expiry_utc"], _ISO)
@@ -187,6 +193,28 @@ def resolve(entry: dict, candles: pd.DataFrame) -> dict:
             entry["mfe_r_optimistic"] = round(max(entry["mfe_r_optimistic"], fav), 3)
             entry["mfe_r"] = round(max(entry["mfe_r"], 0.0 if was_pending else fav), 3)
             entry["mae_r"] = round(max(entry["mae_r"], adv), 3)
+
+        # Break-even stop. Once price has run BREAKEVEN_AT_R in favour the stop
+        # sits at entry, so a return to entry scratches the trade instead of
+        # riding down to the original stop. Armed and triggered within the same
+        # bar counts as scratched: the intrabar path is unknowable and every
+        # other rule here resolves that ambiguity pessimistically.
+        be = entry.get("breakeven_at")
+        if C.BREAKEVEN_ENABLED and be is not None and entry["status"] == "filled":
+            if not entry["be_armed"]:
+                entry["be_armed"] = bool((bar["high"] >= be) if buy else (bar["low"] <= be))
+            # Not on the fill bar: a limit fill means price touched entry on that
+            # bar by definition, so a same-bar check would scratch almost every
+            # trade instantly. Arming may happen there; triggering may not.
+            if entry["be_armed"] and not was_pending:
+                back_to_entry = (bar["low"] <= E) if buy else (bar["high"] >= E)
+                if back_to_entry:
+                    entry["status"] = "breakeven"
+                    entry["resolved_utc"] = bar_t.strftime(_ISO)
+                    if entry["bars_to_resolve"] is None and entry["bars_to_fill"] is not None:
+                        entry["bars_to_resolve"] = entry["bars_since_alert"] - entry["bars_to_fill"]
+                    entry["r_realized"] = _realized_r(entry)
+                    return entry
 
         if entry["status"] == "filled":
             hit_sl  = (bar["low"] <= entry["stop_loss"])  if buy else (bar["high"] >= entry["stop_loss"])
@@ -254,7 +282,7 @@ def expectancy_r(rows: list[dict]) -> Optional[float]:
     correct if level construction ever changes."""
     rs = []
     for r in rows:
-        if r["status"] not in WIN_STATES | {"sl_hit"}:
+        if r["status"] not in WIN_STATES | {"sl_hit", "breakeven"}:
             continue
         v = r.get("r_realized")
         if v is None:
@@ -281,12 +309,13 @@ def stats(entries: list[dict] | None = None,
 
     def _bucket(rows: list[dict]) -> dict:
         total   = len(rows)
-        filled  = [r for r in rows if r["status"] in {"filled", "sl_hit"} | WIN_STATES]
+        filled  = [r for r in rows if r["status"] in {"filled", "sl_hit", "breakeven"} | WIN_STATES]
         wins    = [r for r in rows if r["status"] in WIN_STATES]
         losses  = [r for r in rows if r["status"] == "sl_hit"]
         expired = [r for r in rows if r["status"] == "expired"]
+        scratch = [r for r in rows if r["status"] == "breakeven"]
         open_n  = [r for r in rows if r["status"] in ("pending", "filled")]
-        decided = len(wins) + len(losses)
+        decided = len(wins) + len(losses) + len(scratch)
         # Absent MFE (schema-1 entries) must stay None, never 0 — a legacy loss
         # counted as mfe_r=0 would fake a "direction was wrong" verdict.
         loss_mfe = [r.get("mfe_r") for r in losses if r.get("mfe_r") is not None]
@@ -297,9 +326,13 @@ def stats(entries: list[dict] | None = None,
             "wins":      len(wins),
             "losses":    len(losses),
             "expired":   len(expired),
+            "breakeven": len(scratch),
             "open":      len(open_n),
             "fill_rate": round(len(filled) / total, 2) if total else None,
-            "win_rate":  round(len(wins) / decided, 2) if decided else None,
+            # Win rate excludes scratches: they are neither a win nor a loss, and
+            # counting them as losses would understate the rule that created them.
+            "win_rate":  round(len(wins) / (len(wins) + len(losses)), 2)
+                         if (len(wins) + len(losses)) else None,
             # ── schema 2 additions ────────────────────────────────────────
             "tp1":            sum(1 for r in rows if r["status"] == "tp1_hit"),
             "tp2":            sum(1 for r in rows if r["status"] == "tp2_hit"),
@@ -385,7 +418,7 @@ def format_stats(s: dict) -> str:
     lines = [
         f"Signals: {o['total']}  |  filled: {o['filled']}  |  open: {o['open']}",
         f"Wins: {o['wins']} (TP1 {o['tp1']} / TP2 {o['tp2']})  |  "
-        f"Losses: {o['losses']}  |  expired: {o['expired']}",
+        f"Losses: {o['losses']}  |  scratched: {o['breakeven']}  |  expired: {o['expired']}",
         f"Fill rate: {o['fill_rate']}  |  "
         f"Win rate: {o['win_rate']} ({o['wins']}W/{o['losses']}L, n={o['decided']})  |  "
         f"Expectancy: {exp}",

@@ -216,6 +216,11 @@ def _build_message(sig) -> tuple[str, str]:
         f"Pattern : {sig.pattern_label}",
         f"Entry   : <b>{f(sig.entry)}</b>  ({_entry_label(sig.epic, sig.pattern)})",
         f"SL      : <b>{f(sig.stop_loss)}</b>",
+    ]
+    if getattr(sig, "breakeven_at", None) is not None:
+        lines.append(f"BE      : <b>{f(sig.breakeven_at)}</b>   "
+                     f"(move SL to entry once reached)")
+    lines += [
         f"TP1     : <b>{f(sig.take_profit)}</b>   (R:R {sig.rr:.1f})",
         f"TP2     : <b>{f(sig.take_profit2)}</b>",
         _SEP,
