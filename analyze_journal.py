@@ -224,7 +224,7 @@ def section_mfe(df: pd.DataFrame, min_n: int) -> None:
 
 def section_counterfactuals(df: pd.DataFrame) -> None:
     """Arithmetic on recorded excursions. No strategy change is implied."""
-    d = df[df["decided"]].copy()
+    d = df[df["settled"]].copy()   # scratches count: they are 0R, not absent
     d = d[d["mfe_r"].notna() & d["r_realized"].notna()]
     if d.empty:
         print("\nCOUNTERFACTUALS: no decided trades with excursion data.")
@@ -283,7 +283,7 @@ def section_fills(df: pd.DataFrame) -> None:
             continue
         print(f"\n  by {dim}:")
         for lvl, g in df.groupby(dim, dropna=True):
-            filled = int((g["outcome"].isin(["win", "loss"]) |
+            filled = int((g["outcome"].isin(["win", "loss", "scratch"]) |
                           (g["status"] == "filled")).sum())
             exp = int((g["outcome"] == "expired").sum())
             btf = g["bars_to_fill"].dropna()

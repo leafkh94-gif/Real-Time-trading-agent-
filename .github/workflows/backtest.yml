@@ -22,6 +22,24 @@ on:
         description: 'Instruments, space separated (blank = all)'
         required: false
         default: ''
+      breakeven:
+        description: 'Break-even stop at +1R'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'on', 'off']
+      sweep_bos:
+        description: 'sweep_bos pattern'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'on', 'off']
+      round_bonus:
+        description: 'Round-number bonus'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'on', 'off']
       entry_mode:
         description: 'Force one entry mode on every instrument (config = per-instrument)'
         required: false
@@ -54,13 +72,25 @@ jobs:
           CAPITAL_PASSWORD:   ${{ secrets.CAPITAL_PASSWORD }}
           CAPITAL_DEMO:       "true"
         run: |
-          MODE_ARG=""
+          # if-blocks, not `[ ] && ...`: this step runs under `bash -e`, where a
+          # failing test makes the whole && expression non-zero and aborts the job
+          # whenever an input is left at its "config" default.
+          ARGS=""
           if [ "${{ github.event.inputs.entry_mode }}" != "config" ]; then
-            MODE_ARG="--entry-mode ${{ github.event.inputs.entry_mode }}"
+            ARGS="$ARGS --entry-mode ${{ github.event.inputs.entry_mode }}"
+          fi
+          if [ "${{ github.event.inputs.breakeven }}" != "config" ]; then
+            ARGS="$ARGS --breakeven ${{ github.event.inputs.breakeven }}"
+          fi
+          if [ "${{ github.event.inputs.sweep_bos }}" != "config" ]; then
+            ARGS="$ARGS --sweep-bos ${{ github.event.inputs.sweep_bos }}"
+          fi
+          if [ "${{ github.event.inputs.round_bonus }}" != "config" ]; then
+            ARGS="$ARGS --round-bonus ${{ github.event.inputs.round_bonus }}"
           fi
           python backtest.py ${{ github.event.inputs.epics }} \
             --bars "${{ github.event.inputs.bars }}" \
-            $MODE_ARG \
+            $ARGS \
             --out backtest_entries.json | tee backtest_report.txt
 
       - name: Verify excursion invariants
