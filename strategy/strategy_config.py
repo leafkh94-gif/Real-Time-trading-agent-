@@ -65,10 +65,13 @@ EMA_SLOW_BIAS = 200
 COUNTER_TREND_PATTERNS = frozenset({"sweep_bos", "reversal"})
 
 # ── Additional factors ────────────────────────────────────────────────────────
-# Measured inverted: setups near a round number won 19% vs 38% away from one.
-# Set to 0 rather than deleted — proximity is still recorded in the journal so
-# the factor keeps being measured, it just no longer earns points.
-ROUND_NUMBER_BONUS   = 0
+# Restored to 5 after an isolated test refuted the reason for zeroing it.
+# The "19% vs 38%" split looked damning, but measured ALONE on identical
+# history, removing the bonus made expectancy WORSE: -0.137R -> -0.156R. It
+# dropped 6 losses but also 3 winners, over a smaller trade count. The win-rate
+# split was a symptom of which setups happen to sit near round numbers, not a
+# cost the bonus was imposing. Proximity is still recorded and still measured.
+ROUND_NUMBER_BONUS   = 5
 VOLUME_CONFIRM_BONUS = 3     # optional — CFD tick-volume is unreliable
 CHOPPY_PENALTY       = -10   # applied when ADX < ADX_CHOPPY_THRESHOLD
 

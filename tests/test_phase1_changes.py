@@ -120,5 +120,5 @@ def test_disabled_pattern_keeps_its_config_so_history_stays_readable():
 
 
 # ── round-number bonus ───────────────────────────────────────────────────────
-def test_round_number_pays_nothing():
-    assert C.ROUND_NUMBER_BONUS == 0
+def test_round_number_bonus_restored():
+    assert C.ROUND_NUMBER_BONUS == 5   # restored: removing it measured worse
