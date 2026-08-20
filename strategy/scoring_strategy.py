@@ -273,7 +273,21 @@ def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
     down = e50 < e200 and price < e200
     if up   and direction == "buy":  return C.BIAS_ALIGNED, "aligned-up"
     if down and direction == "sell": return C.BIAS_ALIGNED, "aligned-down"
-    if (up and direction == "sell") or (down and direction == "buy"):
+
+    against = (up and direction == "sell") or (down and direction == "buy")
+    if against:
+        if getattr(C, "DAILY_BIAS_MODE", "strict") == "graduated":
+            # A trade that opposes the primary trend but sides with the medium
+            # one is trading a correction, not fighting the trend. The primary
+            # layer alone cannot tell those apart — EMA200 daily still reads
+            # "up" weeks into a genuine decline, which is why bearish setups
+            # were being banned throughout every pullback.
+            e20 = float(ind.ema(close, C.EMA_MEDIUM_BIAS).iloc[-1])
+            medium_down = e20 < e50
+            medium_up   = e20 > e50
+            if ((up and direction == "sell" and medium_down) or
+                    (down and direction == "buy" and medium_up)):
+                return C.BIAS_CORRECTION, "correction"
         return C.BIAS_COUNTER, "counter-trend"
     return C.BIAS_NEUTRAL, "neutral"
 

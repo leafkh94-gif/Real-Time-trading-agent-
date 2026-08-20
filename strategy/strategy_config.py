@@ -60,6 +60,20 @@ BIAS_COUNTER_REVERSAL = -8    # reversal patterns — allowed with penalty
 EMA_FAST_BIAS = 50
 EMA_SLOW_BIAS = 200
 
+# ── Daily bias mode ───────────────────────────────────────────────────────────
+# "strict"    -> current behaviour. A continuation pattern against the daily
+#                trend is dropped outright (`return None`), which in a long
+#                uptrend bans every bearish continuation setup for weeks: EMA200
+#                on a daily chart still reads "up" well into a real decline.
+#                86 of 99 backtest trades were buys under this rule.
+# "graduated" -> adds a medium-term layer (EMA20/EMA50 daily). When the primary
+#                and medium trends DISAGREE the market is correcting rather than
+#                trending, so a trade siding with the medium trend is allowed
+#                with BIAS_CORRECTION instead of being blocked.
+DAILY_BIAS_MODE = "strict"
+EMA_MEDIUM_BIAS = 20
+BIAS_CORRECTION = -6   # sits between neutral (+5) and counter-reversal (-8)
+
 # Patterns allowed to fire counter-trend (with BIAS_COUNTER_REVERSAL penalty).
 # Continuation patterns not in this set are hard-blocked when counter-trend.
 COUNTER_TREND_PATTERNS = frozenset({"sweep_bos", "reversal"})

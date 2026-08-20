@@ -122,3 +122,57 @@ def test_disabled_pattern_keeps_its_config_so_history_stays_readable():
 # ── round-number bonus ───────────────────────────────────────────────────────
 def test_round_number_bonus_restored():
     assert C.ROUND_NUMBER_BONUS == 5   # restored: removing it measured worse
+
+
+# ── graduated daily bias ─────────────────────────────────────────────────────
+import numpy as np
+from strategy.scoring_strategy import _daily_bias
+
+
+@pytest.fixture
+def restore_bias_mode():
+    saved = C.DAILY_BIAS_MODE
+    yield
+    C.DAILY_BIAS_MODE = saved
+
+
+def _uptrend_then_pullback():
+    """Primary trend up (EMA50>EMA200, price>EMA200) but medium turning down
+    (EMA20<EMA50) — a correction inside an uptrend."""
+    close = np.concatenate([np.linspace(100, 200, 260), np.linspace(200, 175, 40)])
+    return pd.DataFrame({"close": close})
+
+
+def test_strict_blocks_the_correction_sell(restore_bias_mode):
+    C.DAILY_BIAS_MODE = "strict"
+    pts, state = _daily_bias(_uptrend_then_pullback(), "sell")
+    assert state == "counter-trend"
+    assert pts == C.BIAS_COUNTER
+
+
+def test_graduated_allows_it_as_a_correction(restore_bias_mode):
+    C.DAILY_BIAS_MODE = "graduated"
+    pts, state = _daily_bias(_uptrend_then_pullback(), "sell")
+    assert state == "correction"
+    assert pts == C.BIAS_CORRECTION
+
+
+def test_graduated_does_not_change_aligned_trades(restore_bias_mode):
+    """Only the against-the-primary case may differ between modes."""
+    d = _uptrend_then_pullback()
+    C.DAILY_BIAS_MODE = "strict"
+    strict_buy = _daily_bias(d, "buy")
+    C.DAILY_BIAS_MODE = "graduated"
+    assert _daily_bias(d, "buy") == strict_buy
+
+
+def test_graduated_still_blocks_when_both_layers_disagree(restore_bias_mode):
+    """A sell in an uptrend that is NOT correcting stays counter-trend."""
+    C.DAILY_BIAS_MODE = "graduated"
+    close = np.linspace(100, 200, 300)          # medium still rising
+    pts, state = _daily_bias(pd.DataFrame({"close": close}), "sell")
+    assert state == "counter-trend"
+
+
+def test_correction_penalty_sits_between_neutral_and_counter():
+    assert C.BIAS_COUNTER_REVERSAL < C.BIAS_CORRECTION < C.BIAS_NEUTRAL

@@ -132,6 +132,8 @@ def main() -> None:
                     help="enable/disable the sweep_bos pattern (default: config)")
     ap.add_argument("--round-bonus", choices=["on", "off"], default=None,
                     help="round-number bonus, on = 5 points (default: config)")
+    ap.add_argument("--bias-mode", choices=["strict", "graduated"], default=None,
+                    help="daily-bias handling (default: config)")
     ap.add_argument("--entry-mode", choices=C.ENTRY_MODES, default=None,
                     help="force an entry mode on every instrument, overriding "
                          "their config — run once per mode over the same --bars "
@@ -142,6 +144,8 @@ def main() -> None:
         C.BREAKEVEN_ENABLED = args.breakeven == "on"
     if args.sweep_bos:
         C.PATTERNS["sweep_bos"]["enabled"] = args.sweep_bos == "on"
+    if args.bias_mode:
+        C.DAILY_BIAS_MODE = args.bias_mode
     if args.round_bonus:
         C.ROUND_NUMBER_BONUS = 5 if args.round_bonus == "on" else 0
 
@@ -151,6 +155,7 @@ def main() -> None:
     print(f"  break-even stop  : {'ON at +%.1fR' % C.BREAKEVEN_AT_R if C.BREAKEVEN_ENABLED else 'OFF'}")
     print(f"  sweep_bos pattern: {'enabled' if C.PATTERNS['sweep_bos'].get('enabled', True) else 'DISABLED'}")
     print(f"  round-number bonus: {C.ROUND_NUMBER_BONUS} points")
+    print(f"  daily bias mode  : {C.DAILY_BIAS_MODE}")
 
     if args.entry_mode:
         for _cfg in C.INSTRUMENTS.values():

@@ -40,6 +40,12 @@ on:
         default: 'config'
         type: choice
         options: ['config', 'on', 'off']
+      bias_mode:
+        description: 'Daily-bias handling'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'strict', 'graduated']
       entry_mode:
         description: 'Force one entry mode on every instrument (config = per-instrument)'
         required: false
@@ -87,6 +93,9 @@ jobs:
           fi
           if [ "${{ github.event.inputs.round_bonus }}" != "config" ]; then
             ARGS="$ARGS --round-bonus ${{ github.event.inputs.round_bonus }}"
+          fi
+          if [ "${{ github.event.inputs.bias_mode }}" != "config" ]; then
+            ARGS="$ARGS --bias-mode ${{ github.event.inputs.bias_mode }}"
           fi
           python backtest.py ${{ github.event.inputs.epics }} \
             --bars "${{ github.event.inputs.bars }}" \
