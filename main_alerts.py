@@ -44,7 +44,6 @@ def _utcnow() -> _dt.datetime:
 # ── Configuration ─────────────────────────────────────────────────────────────
 SCAN_INTERVAL_S      = 30 * 60        # scan every 30 min (H1 candles form every 60 min)
 ALERT_COOLDOWN_S     = 4 * 60 * 60   # 4-hour cooldown per market — H1 trades need room to develop
-INTER_ALERT_GAP_S    = 2 * 60 * 60   # minimum 2 hours between any two alerts
 HEARTBEAT_INTERVAL_S = 24 * 60 * 60
 # The bot restarts every 90 min (MAX_RUNTIME_S) so the journal artifact uploads.
 # Only announce a restart this often — a chained handoff is not news.
@@ -53,7 +52,6 @@ STATE_FILE           = os.getenv("STATE_FILE", ".bot_state.json")
 
 # Watchlist is driven by the strategy config (single source of truth).
 WATCHLIST = list(C.INSTRUMENTS.keys())          # US500, US30, US100, BTCUSD
-_US_INDEX_GROUP = {e for e, c in C.INSTRUMENTS.items() if c["correlated_group"] == "us_indices"}
 
 
 @dataclass
@@ -218,6 +216,11 @@ def _build_message(sig) -> tuple[str, str]:
         f"Pattern : {sig.pattern_label}",
         f"Entry   : <b>{f(sig.entry)}</b>  ({_entry_label(sig.epic, sig.pattern)})",
         f"SL      : <b>{f(sig.stop_loss)}</b>",
+    ]
+    if getattr(sig, "breakeven_at", None) is not None:
+        lines.append(f"BE      : <b>{f(sig.breakeven_at)}</b>   "
+                     f"(move SL to entry once reached)")
+    lines += [
         f"TP1     : <b>{f(sig.take_profit)}</b>   (R:R {sig.rr:.1f})",
         f"TP2     : <b>{f(sig.take_profit2)}</b>",
         _SEP,
@@ -398,23 +401,16 @@ def main() -> None:
             logger.info("News blackout active — suppressing %d candidate(s)", len(candidates))
             candidates = {}
 
-        # Correlation filter: among US indices, keep only the strongest; BTC exempt.
-        us_hits = {e: s for e, s in candidates.items() if e in _US_INDEX_GROUP}
-        if len(us_hits) > 1:
-            best = max(us_hits, key=lambda e: us_hits[e].score)
-            for e in list(us_hits):
-                if e != best:
-                    logger.info("%s: suppressed by correlation filter (kept %s)", e, best)
-                    candidates.pop(e, None)
-
-        # Emit, honoring daily caps and inter-alert gap
+        # Correlation filter and inter-alert gap removed by request. Every
+        # qualifying setup is now emitted, subject only to the per-instrument
+        # cooldown and the daily caps. Note this means the three US indices can
+        # alert simultaneously; they are highly correlated, so taking all three
+        # is closer to one position at triple size than to three independent
+        # trades. Position sizing is the user's call.
         instr_by_epic = {i.epic: i for i in INSTRUMENTS}
         for epic, sig in sorted(candidates.items(), key=lambda kv: -kv[1].score):
             if not state.can_send(sig.tier):
                 logger.info("%s: %s daily cap reached — skipping", epic, sig.tier)
-                continue
-            if time.time() - _last_any_alert < INTER_ALERT_GAP_S:
-                logger.info("%s: inter-alert gap active — skipping", epic)
                 continue
             _send_alert(instr_by_epic[epic], sig, notifier, logger)
             state.record(sig.tier)

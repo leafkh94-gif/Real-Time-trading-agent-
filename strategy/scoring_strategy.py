@@ -49,6 +49,7 @@ class Signal:
     take_profit:   float
     take_profit2:  float
     rr:            float
+    breakeven_at: Optional[float] = None   # move stop to entry once price reaches this
     reasons:       list[str] = field(default_factory=list)
     components:    dict       = field(default_factory=dict)   # score contributions only
     context:       dict       = field(default_factory=dict)   # raw market state (diagnostics)
@@ -229,6 +230,12 @@ _DETECTORS = [_detect_sweep_bos, _detect_reversal, _detect_sd_rejection,
               _detect_flag, _detect_news_retest]
 
 
+def _pattern_enabled(name: str) -> bool:
+    """Patterns can be switched off in config without deleting the detector,
+    so a disabled pattern keeps its label, history and journal comparability."""
+    return C.PATTERNS.get(name, {}).get("enabled", True)
+
+
 # ── Factor scoring ───────────────────────────────────────────────────
 def _technical_confirmation(df: pd.DataFrame, direction: str) -> tuple[int, list[str], dict]:
     """Factor 2 — RSI direction + VWAP position + EMA20 (v3.1: MACD replaced by VWAP).
@@ -344,8 +351,14 @@ def _build_levels(epic: str, det: dict, atr_now: float) -> Optional[dict]:
     tp1 = entry + dist * C.MIN_RR       if direction == "buy" else entry - dist * C.MIN_RR
     tp2 = entry + dist * (C.MIN_RR + 1) if direction == "buy" else entry - dist * (C.MIN_RR + 1)
     rr  = abs(tp1 - entry) / max(abs(entry - sl), 1e-9)
+    # Price at which the stop moves to entry. 15 of 52 losses in the latest
+    # backtest had already run this far in favour before reversing into the stop.
+    be = None
+    if C.BREAKEVEN_ENABLED:
+        be = (entry + dist * C.BREAKEVEN_AT_R if direction == "buy"
+              else entry - dist * C.BREAKEVEN_AT_R)
     return {"entry": entry, "stop_loss": sl, "take_profit": tp1,
-            "take_profit2": tp2, "rr": rr,
+            "take_profit2": tp2, "rr": rr, "breakeven_at": be,
             "_diag": {"sl_clip": sl_clip,
                       "entry_mode": mode,
                       "raw_sl_dist_atr": round(raw_dist / max(atr_now, 1e-9), 3),
@@ -374,7 +387,8 @@ class ScoringStrategy:
         if atr_now / max(price_now, 1e-9) > self.cfg["volatile_atr_pct"]:
             return None
 
-        det = next((d for d in (f(df, a) for f in _DETECTORS) if d), None)
+        det = next((d for d in (f(df, a) for f in _DETECTORS)
+                    if d and _pattern_enabled(d["pattern"])), None)
         if det is None:
             return None
         direction = det["direction"]
