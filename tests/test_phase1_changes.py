@@ -120,5 +120,111 @@ def test_disabled_pattern_keeps_its_config_so_history_stays_readable():
 
 
 # ── round-number bonus ───────────────────────────────────────────────────────
-def test_round_number_pays_nothing():
-    assert C.ROUND_NUMBER_BONUS == 0
+def test_round_number_bonus_restored():
+    assert C.ROUND_NUMBER_BONUS == 5   # restored: removing it measured worse
+
+
+# ── graduated daily bias ─────────────────────────────────────────────────────
+import numpy as np
+from strategy.scoring_strategy import _daily_bias
+
+
+@pytest.fixture
+def restore_bias_mode():
+    saved = C.DAILY_BIAS_MODE
+    yield
+    C.DAILY_BIAS_MODE = saved
+
+
+def _uptrend_then_pullback():
+    """Primary trend up (EMA50>EMA200, price>EMA200) but medium turning down
+    (EMA20<EMA50) — a correction inside an uptrend."""
+    close = np.concatenate([np.linspace(100, 200, 260), np.linspace(200, 175, 40)])
+    return pd.DataFrame({"close": close})
+
+
+def test_strict_blocks_the_correction_sell(restore_bias_mode):
+    C.DAILY_BIAS_MODE = "strict"
+    pts, state = _daily_bias(_uptrend_then_pullback(), "sell")
+    assert state == "counter-trend"
+    assert pts == C.BIAS_COUNTER
+
+
+def test_graduated_allows_it_as_a_correction(restore_bias_mode):
+    C.DAILY_BIAS_MODE = "graduated"
+    pts, state = _daily_bias(_uptrend_then_pullback(), "sell")
+    assert state == "correction"
+    assert pts == C.BIAS_CORRECTION
+
+
+def test_graduated_does_not_change_aligned_trades(restore_bias_mode):
+    """Only the against-the-primary case may differ between modes."""
+    d = _uptrend_then_pullback()
+    C.DAILY_BIAS_MODE = "strict"
+    strict_buy = _daily_bias(d, "buy")
+    C.DAILY_BIAS_MODE = "graduated"
+    assert _daily_bias(d, "buy") == strict_buy
+
+
+def test_graduated_still_blocks_when_both_layers_disagree(restore_bias_mode):
+    """A sell in an uptrend that is NOT correcting stays counter-trend."""
+    C.DAILY_BIAS_MODE = "graduated"
+    close = np.linspace(100, 200, 300)          # medium still rising
+    pts, state = _daily_bias(pd.DataFrame({"close": close}), "sell")
+    assert state == "counter-trend"
+
+
+def test_correction_penalty_sits_between_neutral_and_counter():
+    assert C.BIAS_COUNTER_REVERSAL < C.BIAS_CORRECTION < C.BIAS_NEUTRAL
+
+
+# ── week-1 structural fixes ──────────────────────────────────────────────────
+from strategy.scoring_strategy import _pattern_quality
+
+
+def test_best_pattern_wins_not_first_in_list():
+    """flag (+0.29R measured) must beat reversal (-0.25R) when both fire, and
+    list order must not decide it. reversal sits earlier in _DETECTORS."""
+    weak = {"pattern": "reversal", "bonus": 0.0}      # 37 + 0
+    strong = {"pattern": "flag", "bonus": 8.0}        # 36 + 8 = 44
+    assert _pattern_quality(strong) > _pattern_quality(weak)
+    assert max([weak, strong], key=_pattern_quality) is strong
+
+
+def test_pattern_quality_caps_the_bonus():
+    """A detector reporting an absurd bonus cannot outrank on that alone."""
+    capped = {"pattern": "flag", "bonus": 999.0}
+    assert _pattern_quality(capped) == 36 + C.PATTERNS["flag"]["max_bonus"]
+
+
+def test_far_limit_entries_are_rejected():
+    """Beyond 1.5 ATR the measured fill rate is 0.23 — three in four expire."""
+    far = {"pattern": "sd_rejection", "direction": "buy", "broken_level": 100.0,
+           "ref_low": 95.0, "ref_high": 110.0,
+           "confirm_price": 130.0,      # 3 ATR away from the limit at 100
+           "bonus": 5.0}
+    lv = _build_levels("BTCUSD", far, 10.0)
+    assert lv["_diag"]["entry_dist_atr"] > C.MAX_ENTRY_DIST_ATR
+
+
+def test_near_limit_entries_survive():
+    near = {"pattern": "sd_rejection", "direction": "buy", "broken_level": 100.0,
+            "ref_low": 95.0, "ref_high": 110.0, "confirm_price": 103.0,
+            "bonus": 5.0}
+    lv = _build_levels("BTCUSD", near, 10.0)
+    assert lv["_diag"]["entry_dist_atr"] <= C.MAX_ENTRY_DIST_ATR
+
+
+def test_spread_cost_is_charged_to_expectancy():
+    """A 2R win costs one round-trip spread; net must be below gross."""
+    e = entry(); e["status"] = "tp1_hit"; e["r_realized"] = 2.0; e["spread_r"] = 0.05
+    assert journal.expectancy_r([e]) == pytest.approx(2.0)
+    assert journal.expectancy_r([e], net_of_spread=True) == pytest.approx(1.95)
+
+
+def test_entries_without_a_spread_are_charged_nothing():
+    """Older entries must not be charged a guessed cost — the net figure is
+    then optimistic, which is the honest direction to fail in."""
+    e = entry(); e["status"] = "sl_hit"; e["r_realized"] = -1.0
+    e.pop("spread_r", None)
+    assert journal.expectancy_r([e], net_of_spread=True) == pytest.approx(-1.0)

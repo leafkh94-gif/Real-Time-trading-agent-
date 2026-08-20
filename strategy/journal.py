@@ -87,6 +87,11 @@ def entry_from_signal(sig, now: dt.datetime) -> dict:
         "sl_distance":     round(risk, 4),
         "sl_distance_atr": round(risk / atr, 3) if atr else None,
         "entry_dist_atr":  ctx.get("entry_dist_atr"),
+        "spread":          ctx.get("spread"),
+        # Round-trip spread as a fraction of risk — the amount every trade pays
+        # before the strategy has done anything at all.
+        "spread_r":        (round(ctx["spread"] / risk, 4)
+                            if ctx.get("spread") and risk > 0 else None),
         "components":      dict(getattr(sig, "components", {}) or {}),
         "reasons":         list(getattr(sig, "reasons", []) or []),
         "context":         ctx,
@@ -276,10 +281,15 @@ def _median(vals: list) -> Optional[float]:
     return round(vals[m] if len(vals) % 2 else (vals[m - 1] + vals[m]) / 2, 3)
 
 
-def expectancy_r(rows: list[dict]) -> Optional[float]:
+def expectancy_r(rows: list[dict], net_of_spread: bool = False) -> Optional[float]:
     """Mean R per decided trade. Uses each entry's own recorded r_realized,
     falling back to its stored levels — never a hardcoded MIN_RR, so it stays
-    correct if level construction ever changes."""
+    correct if level construction ever changes.
+
+    net_of_spread subtracts the round-trip cost, which is what the account
+    actually experiences. Entries without a recorded spread are charged
+    nothing rather than a guess, so the net figure is itself optimistic when
+    older entries are mixed in."""
     rs = []
     for r in rows:
         if r["status"] not in WIN_STATES | {"sl_hit", "breakeven"}:
@@ -288,6 +298,8 @@ def expectancy_r(rows: list[dict]) -> Optional[float]:
         if v is None:
             v = _realized_r(r)
         if v is not None:
+            if net_of_spread and r.get("spread_r"):
+                v -= r["spread_r"]
             rs.append(v)
     return _mean(rs)
 
@@ -338,6 +350,7 @@ def stats(entries: list[dict] | None = None,
             "tp2":            sum(1 for r in rows if r["status"] == "tp2_hit"),
             "decided":        decided,
             "expectancy_r":   expectancy_r(rows),
+            "expectancy_net": expectancy_r(rows, net_of_spread=True),
             "n_with_mfe":     len(loss_mfe),
             "med_mfe_loss":   _median(loss_mfe),
             "avg_mfe_loss":   _mean(loss_mfe),
@@ -421,7 +434,9 @@ def format_stats(s: dict) -> str:
         f"Losses: {o['losses']}  |  scratched: {o['breakeven']}  |  expired: {o['expired']}",
         f"Fill rate: {o['fill_rate']}  |  "
         f"Win rate: {o['win_rate']} ({o['wins']}W/{o['losses']}L, n={o['decided']})  |  "
-        f"Expectancy: {exp}",
+        f"Expectancy: {exp}"
+        + (f"  |  net of spread: {o['expectancy_net']:+.3f}R"
+           if o.get("expectancy_net") is not None else ""),
     ]
     if o["n_with_mfe"]:
         lines.append(

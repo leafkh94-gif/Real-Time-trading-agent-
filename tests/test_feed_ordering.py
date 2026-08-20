@@ -77,7 +77,8 @@ def test_all_timestamps_unusable_returns_empty(feed):
     feed._epic = "US500"
     df = feed._to_df([_price(1, 5001, ts="junk"), _price(2, 5002, ts="junk")])
     assert df.empty
-    assert list(df.columns) == ["time", "open", "high", "low", "close", "volume"]
+    assert list(df.columns) == ["time", "open", "high", "low", "close",
+                                "volume", "spread"]
 
 
 def test_empty_response(feed):
@@ -90,7 +91,15 @@ def test_mid_price_and_columns_preserved(feed):
     df = feed._to_df([_price(5, 5005)])
     assert df["close"].iloc[0] == pytest.approx(5005.0)   # (bid+ask)/2
     assert df["high"].iloc[0] == pytest.approx(5010.0)
-    assert list(df.columns) == ["time", "open", "high", "low", "close", "volume"]
+    assert list(df.columns) == ["time", "open", "high", "low", "close",
+                                "volume", "spread"]
+
+
+def test_spread_is_kept_not_discarded(feed):
+    """OHLC are mid prices; the cost of crossing the book must survive."""
+    feed._epic = "US500"
+    df = feed._to_df([_price(5, 5005)])           # bid 5004.5 / ask 5005.5
+    assert df["spread"].iloc[0] == pytest.approx(1.0)
 
 
 def test_dropping_the_forming_candle_targets_the_newest_bar(feed):

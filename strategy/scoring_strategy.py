@@ -230,6 +230,12 @@ _DETECTORS = [_detect_sweep_bos, _detect_reversal, _detect_sd_rejection,
               _detect_flag, _detect_news_retest]
 
 
+def _pattern_quality(det: dict) -> float:
+    """Factor-1 score of a detection — base plus its capped bonus."""
+    pat = C.PATTERNS[det["pattern"]]
+    return pat["base"] + min(det["bonus"], pat["max_bonus"])
+
+
 def _pattern_enabled(name: str) -> bool:
     """Patterns can be switched off in config without deleting the detector,
     so a disabled pattern keeps its label, history and journal comparability."""
@@ -273,7 +279,21 @@ def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
     down = e50 < e200 and price < e200
     if up   and direction == "buy":  return C.BIAS_ALIGNED, "aligned-up"
     if down and direction == "sell": return C.BIAS_ALIGNED, "aligned-down"
-    if (up and direction == "sell") or (down and direction == "buy"):
+
+    against = (up and direction == "sell") or (down and direction == "buy")
+    if against:
+        if getattr(C, "DAILY_BIAS_MODE", "strict") == "graduated":
+            # A trade that opposes the primary trend but sides with the medium
+            # one is trading a correction, not fighting the trend. The primary
+            # layer alone cannot tell those apart — EMA200 daily still reads
+            # "up" weeks into a genuine decline, which is why bearish setups
+            # were being banned throughout every pullback.
+            e20 = float(ind.ema(close, C.EMA_MEDIUM_BIAS).iloc[-1])
+            medium_down = e20 < e50
+            medium_up   = e20 > e50
+            if ((up and direction == "sell" and medium_down) or
+                    (down and direction == "buy" and medium_up)):
+                return C.BIAS_CORRECTION, "correction"
         return C.BIAS_COUNTER, "counter-trend"
     return C.BIAS_NEUTRAL, "neutral"
 
@@ -387,8 +407,14 @@ class ScoringStrategy:
         if atr_now / max(price_now, 1e-9) > self.cfg["volatile_atr_pct"]:
             return None
 
-        det = next((d for d in (f(df, a) for f in _DETECTORS)
-                    if d and _pattern_enabled(d["pattern"])), None)
+        # Every detector runs, and the strongest candidate wins. Taking the
+        # first match meant list order decided quality: `reversal` sits above
+        # `flag`, so whenever both fired the measured LOSER (-0.25R) was
+        # preferred over the measured winner (+0.29R) for no reason but its
+        # index in _DETECTORS.
+        cands = [d for d in (f(df, a) for f in _DETECTORS)
+                 if d and _pattern_enabled(d["pattern"])]
+        det = max(cands, key=_pattern_quality) if cands else None
         if det is None:
             return None
         direction = det["direction"]
@@ -494,6 +520,12 @@ class ScoringStrategy:
         if levels is None:
             return None
         diag = levels.pop("_diag")
+        # Setups whose limit sits far from price almost never fill: measured
+        # fill rate 0.23 beyond 1.5 ATR versus 0.89 within 0.5 ATR. They burn a
+        # daily-cap slot and an alert to expire unfilled three times in four.
+        if (C.MAX_ENTRY_DIST_ATR is not None
+                and diag["entry_dist_atr"] > C.MAX_ENTRY_DIST_ATR):
+            return None
         if tier == "A+" and levels["rr"] < C.MIN_RR - 1e-6:
             tier = "WATCH"
 
@@ -517,6 +549,8 @@ class ScoringStrategy:
             "broken_level":     round(float(det["broken_level"]), 4),
             "confirm_price":    round(float(det["confirm_price"]), 4),
             "a_plus_threshold": self.a_plus_threshold,
+            "spread": (round(float(df["spread"].iloc[-1]), 5)
+                       if "spread" in df.columns else None),
             **diag,
             **conf_raw,
         }

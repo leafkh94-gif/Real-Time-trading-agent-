@@ -60,15 +60,32 @@ BIAS_COUNTER_REVERSAL = -8    # reversal patterns — allowed with penalty
 EMA_FAST_BIAS = 50
 EMA_SLOW_BIAS = 200
 
+# ── Daily bias mode ───────────────────────────────────────────────────────────
+# "strict"    -> current behaviour. A continuation pattern against the daily
+#                trend is dropped outright (`return None`), which in a long
+#                uptrend bans every bearish continuation setup for weeks: EMA200
+#                on a daily chart still reads "up" well into a real decline.
+#                86 of 99 backtest trades were buys under this rule.
+# "graduated" -> adds a medium-term layer (EMA20/EMA50 daily). When the primary
+#                and medium trends DISAGREE the market is correcting rather than
+#                trending, so a trade siding with the medium trend is allowed
+#                with BIAS_CORRECTION instead of being blocked.
+DAILY_BIAS_MODE = "strict"
+EMA_MEDIUM_BIAS = 20
+BIAS_CORRECTION = -6   # sits between neutral (+5) and counter-reversal (-8)
+
 # Patterns allowed to fire counter-trend (with BIAS_COUNTER_REVERSAL penalty).
 # Continuation patterns not in this set are hard-blocked when counter-trend.
 COUNTER_TREND_PATTERNS = frozenset({"sweep_bos", "reversal"})
 
 # ── Additional factors ────────────────────────────────────────────────────────
-# Measured inverted: setups near a round number won 19% vs 38% away from one.
-# Set to 0 rather than deleted — proximity is still recorded in the journal so
-# the factor keeps being measured, it just no longer earns points.
-ROUND_NUMBER_BONUS   = 0
+# Restored to 5 after an isolated test refuted the reason for zeroing it.
+# The "19% vs 38%" split looked damning, but measured ALONE on identical
+# history, removing the bonus made expectancy WORSE: -0.137R -> -0.156R. It
+# dropped 6 losses but also 3 winners, over a smaller trade count. The win-rate
+# split was a symptom of which setups happen to sit near round numbers, not a
+# cost the bonus was imposing. Proximity is still recorded and still measured.
+ROUND_NUMBER_BONUS   = 5
 VOLUME_CONFIRM_BONUS = 3     # optional — CFD tick-volume is unreliable
 CHOPPY_PENALTY       = -10   # applied when ADX < ADX_CHOPPY_THRESHOLD
 
@@ -174,6 +191,12 @@ INSTRUMENTS = {
                "entry_mode": "retrace_limit",     # control group for the A/B
                "correlated_group": None, "always_open": True},
 }
+
+# Limit entries further than this from the confirmation close are dropped.
+# Measured fill rate by distance: <0.5 ATR -> 0.89, 0.5-1.0 -> 0.64,
+# 1.0-1.5 -> 0.74, 1.5+ -> 0.23. Beyond 1.5 ATR the setup expires unfilled
+# roughly three times in four. None disables the check.
+MAX_ENTRY_DIST_ATR = 1.5
 
 MIN_RR = 2.0
 

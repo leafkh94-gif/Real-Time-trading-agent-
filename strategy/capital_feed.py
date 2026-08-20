@@ -19,7 +19,7 @@ _LIVE_BASE = "https://api-capital.backend-capital.com/api/v1"
 _PING_INTERVAL = 8 * 60
 _TIMEOUT       = 15
 _LOGIN_RETRIES = 5
-_EMPTY_DF      = pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"])
+_EMPTY_DF      = pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume", "spread"])
 
 
 class CapitalComFeed:
@@ -77,6 +77,11 @@ class CapitalComFeed:
                 "low":    mid(p["lowPrice"]),
                 "close":  mid(p["closePrice"]),
                 "volume": float(p.get("lastTradedVolume", 0)),
+                # Kept, not discarded: OHLC are mid prices, but a buy fills at
+                # ask and exits at bid. Ignoring the spread makes every recorded
+                # expectancy optimistic by roughly one spread per round trip —
+                # on US500 that is ~2% of a 30-point stop.
+                "spread": float(p["closePrice"]["ask"] - p["closePrice"]["bid"]),
             })
         if not rows:
             return _EMPTY_DF.copy()
