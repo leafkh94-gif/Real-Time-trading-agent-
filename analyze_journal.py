@@ -96,7 +96,8 @@ def normalize(entries: list[dict]) -> pd.DataFrame:
             r[f"comp_{k}"] = comp.get(k)
         for k in ("bias_state", "adx", "atr", "atr_pct", "session_label",
                   "avwap_state", "vp_state", "confirm_count", "sl_clip",
-                  "raw_sl_dist_atr", "hour_utc", "weekday"):
+                  "raw_sl_dist_atr", "hour_utc", "weekday",
+                  "vwap", "price", "ema20", "rsi"):
             r[f"ctx_{k}"] = ctx.get(k)
         rows.append(r)
 
@@ -112,6 +113,21 @@ def normalize(entries: list[dict]) -> pd.DataFrame:
         lambda v: None if v is None else bool(v < 0))
     df["round_number"] = df["comp_round_number"].apply(
         lambda v: None if v is None else bool(v > 0))
+    # How far price had ALREADY run in the trade's direction, measured against
+    # value (rolling VWAP) in ATR units. The scoring system rewards this — every
+    # price-derived factor agrees once a move is extended — but a large value
+    # means the move mostly happened before the signal fired. If late entry is
+    # what kills these trades, this column separates winners from losers.
+    def _ext(row):
+        v, p, a = row.get("ctx_vwap"), row.get("ctx_price"), row.get("ctx_atr")
+        if v is None or p is None or not a:
+            return None
+        run = (p - v) if row["direction"] == "buy" else (v - p)
+        return round(run / a, 3)
+    df["extension_atr"] = df.apply(_ext, axis=1)
+    df["extension_band"] = df["extension_atr"].apply(
+        lambda v: _band(v, [0.0, 0.5, 1.0, 2.0],
+                        ["<0 (against)", "0-0.5", "0.5-1.0", "1.0-2.0", "2.0+"]))
     df["score_band"] = df["score"].apply(
         lambda v: _band(v, [72, 76, 80, 84, 88],
                         ["<72", "72-75", "76-79", "80-83", "84-87", "88+"]))
@@ -271,12 +287,51 @@ def section_fills(df: pd.DataFrame) -> None:
                   + (f"  median bars to fill={btf.median():.0f}" if len(btf) else ""))
 
 
+def section_pattern_edge(df: pd.DataFrame) -> None:
+    """Does each pattern have edge ON ITS OWN, ignoring the score?
+
+    The score has been shown to rank setups inversely, so aggregate expectancy
+    conflates "is this pattern any good" with "did the score pick badly". This
+    section answers the first question only — and it decides whether the fix is
+    to rebuild the ranking or to drop patterns outright.
+    """
+    d = df[df["decided"]]
+    if d.empty:
+        print("\nNo decided trades — cannot measure pattern edge.")
+        return
+    print("\n" + "=" * 72)
+    print("PATTERN EDGE  (score ignored — expectancy of each pattern alone)")
+    print("=" * 72)
+    print(f"  break-even win rate at {C.MIN_RR:.0f}:1 is "
+          f"{1/(1+C.MIN_RR):.0%} — above it the pattern makes money\n")
+    print(f"  {'pattern':<14}{'base':>5}{'n':>5}{'W':>4}{'L':>4}"
+          f"{'win rate':>10}{'expectancy':>12}{'':>4}")
+    print("  " + "-" * 62)
+    rows = []
+    for pat, g in d.groupby("pattern"):
+        n = len(g)
+        w = int((g["outcome"] == "win").sum())
+        rate = w / n
+        exp = g["r_realized"].dropna().astype(float).mean() if g["r_realized"].notna().any() else float("nan")
+        rows.append((pat, n, w, n - w, rate, exp))
+    for pat, n, w, l, rate, exp in sorted(rows, key=lambda r: -r[5] if r[5] == r[5] else 1):
+        base = C.PATTERNS.get(pat, {}).get("base", "?")
+        lo, hi = wilson(w, n)
+        mark = "PROFITABLE" if exp == exp and exp > 0 else ""
+        flag = "  <-- never won" if w == 0 else ""
+        print(f"  {pat:<14}{base:>5}{n:>5}{w:>4}{l:>4}{rate:>9.0%}"
+              f"{exp:>11.2f}R  {mark}{flag}")
+        print(f"  {'':<14}{'':>5}  95% CI [{lo:.2f}-{hi:.2f}]")
+    print("\n  NOTE: a pattern that never won in a small sample is suggestive,")
+    print("        not proven. Check n before acting on any single row.")
+
+
 DIMENSIONS = [
     "pattern", "pattern_type", "tier", "direction", "epic", "score_band",
     "ctx_session_label", "hour_bucket", "ctx_weekday", "ctx_bias_state",
     "choppy", "round_number", "ctx_avwap_state", "ctx_vp_state",
     "ctx_confirm_count", "ctx_sl_clip", "sl_atr_band", "atr_pct_band",
-    "entry_dist_band", "source",
+    "entry_dist_band", "extension_band", "source",
 ]
 
 
@@ -426,6 +481,7 @@ def main() -> None:
         return
 
     section_mfe(df, args.min_n)
+    section_pattern_edge(df)
     section_counterfactuals(df)
     section_fills(df)
     section_dimensions(df, args.min_n)
