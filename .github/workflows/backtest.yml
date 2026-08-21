@@ -40,6 +40,34 @@ on:
         default: 'config'
         type: choice
         options: ['config', 'on', 'off']
+      session_weights:
+        description: 'Session bonus table'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'v3', 'measured']
+      tier_mode:
+        description: 'A+/WATCH split or unified'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'split', 'unified']
+      sl_mult:
+        description: 'Stop-distance multiplier, targets fixed (blank = config)'
+        required: false
+        default: ''
+      tp_structure:
+        description: 'Reject TP beyond nearest swing'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'on', 'off']
+      sd_unbroken:
+        description: 'Require rejection level unbroken'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'on', 'off']
       bias_mode:
         description: 'Daily-bias handling'
         required: false
@@ -96,6 +124,21 @@ jobs:
           fi
           if [ "${{ github.event.inputs.bias_mode }}" != "config" ]; then
             ARGS="$ARGS --bias-mode ${{ github.event.inputs.bias_mode }}"
+          fi
+          if [ "${{ github.event.inputs.session_weights }}" != "config" ]; then
+            ARGS="$ARGS --session-weights ${{ github.event.inputs.session_weights }}"
+          fi
+          if [ "${{ github.event.inputs.tier_mode }}" != "config" ]; then
+            ARGS="$ARGS --tier-mode ${{ github.event.inputs.tier_mode }}"
+          fi
+          if [ -n "${{ github.event.inputs.sl_mult }}" ]; then
+            ARGS="$ARGS --sl-mult ${{ github.event.inputs.sl_mult }}"
+          fi
+          if [ "${{ github.event.inputs.tp_structure }}" != "config" ]; then
+            ARGS="$ARGS --tp-structure ${{ github.event.inputs.tp_structure }}"
+          fi
+          if [ "${{ github.event.inputs.sd_unbroken }}" != "config" ]; then
+            ARGS="$ARGS --sd-unbroken ${{ github.event.inputs.sd_unbroken }}"
           fi
           python backtest.py ${{ github.event.inputs.epics }} \
             --bars "${{ github.event.inputs.bars }}" \

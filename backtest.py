@@ -132,6 +132,16 @@ def main() -> None:
                     help="enable/disable the sweep_bos pattern (default: config)")
     ap.add_argument("--round-bonus", choices=["on", "off"], default=None,
                     help="round-number bonus, on = 5 points (default: config)")
+    ap.add_argument("--session-weights", choices=["v3", "measured"], default=None,
+                    help="session bonus table (default: config)")
+    ap.add_argument("--tier-mode", choices=["split", "unified"], default=None,
+                    help="A+/WATCH split or one tier (default: config)")
+    ap.add_argument("--sl-mult", type=float, default=None,
+                    help="multiplier on the stop distance; targets do not move")
+    ap.add_argument("--tp-structure", choices=["on", "off"], default=None,
+                    help="reject setups whose TP1 sits beyond the nearest swing")
+    ap.add_argument("--sd-unbroken", choices=["on", "off"], default=None,
+                    help="require the rejection level to be unbroken")
     ap.add_argument("--bias-mode", choices=["strict", "graduated"], default=None,
                     help="daily-bias handling (default: config)")
     ap.add_argument("--entry-mode", choices=C.ENTRY_MODES, default=None,
@@ -146,6 +156,16 @@ def main() -> None:
         C.PATTERNS["sweep_bos"]["enabled"] = args.sweep_bos == "on"
     if args.bias_mode:
         C.DAILY_BIAS_MODE = args.bias_mode
+    if args.session_weights:
+        C.SESSION_WEIGHTS_MODE = args.session_weights
+    if args.tier_mode:
+        C.TIER_MODE = args.tier_mode
+    if args.sl_mult is not None:
+        C.SL_DISTANCE_MULT = args.sl_mult
+    if args.tp_structure:
+        C.TP_STRUCTURE_CHECK = args.tp_structure == "on"
+    if args.sd_unbroken:
+        C.SD_REQUIRE_LEVEL_UNBROKEN = args.sd_unbroken == "on"
     if args.round_bonus:
         C.ROUND_NUMBER_BONUS = 5 if args.round_bonus == "on" else 0
 
@@ -156,6 +176,11 @@ def main() -> None:
     print(f"  sweep_bos pattern: {'enabled' if C.PATTERNS['sweep_bos'].get('enabled', True) else 'DISABLED'}")
     print(f"  round-number bonus: {C.ROUND_NUMBER_BONUS} points")
     print(f"  daily bias mode  : {C.DAILY_BIAS_MODE}")
+    print(f"  session weights  : {C.SESSION_WEIGHTS_MODE}")
+    print(f"  tier mode        : {C.TIER_MODE}")
+    print(f"  stop multiplier  : {C.SL_DISTANCE_MULT}  (targets fixed)")
+    print(f"  TP structure chk : {'on' if C.TP_STRUCTURE_CHECK else 'off'}")
+    print(f"  SD level unbroken: {'on' if C.SD_REQUIRE_LEVEL_UNBROKEN else 'off'}")
 
     if args.entry_mode:
         for _cfg in C.INSTRUMENTS.values():

@@ -10,10 +10,18 @@ from __future__ import annotations
 import datetime as dt
 from zoneinfo import ZoneInfo
 
+from . import strategy_config as C
 from .strategy_config import (
-    SESSION_TABLES, BTC_US_OVERLAP_BONUS, BTC_EUROPE_BONUS,
+    BTC_US_OVERLAP_BONUS, BTC_EUROPE_BONUS,
     BTC_ASIA_BONUS, BTC_WEEKEND_PENALTY,
 )
+
+
+def _tables():
+    """Session weights in force — read at call time, not import time, so a
+    backtest can switch modes without reimporting the module."""
+    return (C.SESSION_TABLES_MEASURED if C.SESSION_WEIGHTS_MODE == "measured"
+            else C.SESSION_TABLES)
 
 _ET = ZoneInfo("America/New_York")
 
@@ -41,7 +49,7 @@ def session_score(epic_session: str, now_utc: dt.datetime) -> int:
             return BTC_EUROPE_BONUS
         return BTC_ASIA_BONUS
 
-    table = SESSION_TABLES.get(epic_session, [])
+    table = _tables().get(epic_session, [])
     for start, end, pts in table:
         if _in_window(t, start, end):
             return pts
@@ -67,7 +75,7 @@ def session_label(epic_session: str, now_utc: dt.datetime) -> str:
         return "btc_asia"
 
     names = {(12, 30): "new_york", (7, 0): "london", (0, 0): "asia"}
-    for start, end, _pts in SESSION_TABLES.get(epic_session, []):
+    for start, end, _pts in _tables().get(epic_session, []):
         if _in_window(t, start, end):
             return names.get(tuple(start), f"{start[0]:02d}{start[1]:02d}")
     return "off_hours"

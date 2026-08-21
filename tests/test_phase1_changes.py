@@ -228,3 +228,99 @@ def test_entries_without_a_spread_are_charged_nothing():
     e = entry(); e["status"] = "sl_hit"; e["r_realized"] = -1.0
     e.pop("spread_r", None)
     assert journal.expectancy_r([e], net_of_spread=True) == pytest.approx(-1.0)
+
+
+# ── sd_rejection: reclaim requirement ────────────────────────────────────────
+from strategy import indicators as ind
+from strategy.scoring_strategy import _detect_sd_rejection
+
+
+def _sd_frame(last):
+    """Swing low at 99.0 (the bar's LOW at index 10), then a retest candle."""
+    base = [105, 106, 104, 105, 103, 104, 102, 103, 101, 102,
+            100, 103, 104, 103, 104, 103, 104, 103]
+    rows = [{"open": float(b) + 0.1, "high": float(b) + 1.2, "low": float(b) - 1.0,
+             "close": float(b), "volume": 100.0} for b in base]
+    rows.append(dict(zip(["open", "high", "low", "close"], [float(x) for x in last]),
+                     volume=100.0))
+    return pd.DataFrame(rows)
+
+
+def test_close_below_support_is_not_a_demand_rejection():
+    """The bug behind an inverted-looking BUY: every legacy condition passes —
+    low near the level, long lower wick, green candle — but the candle closes
+    BELOW the level. A close below support means support failed."""
+    d = _sd_frame([98.95, 99.05, 98.50, 98.98])
+    o, c, h, l = 98.95, 98.98, 99.05, 98.50
+    assert c > o                                   # green
+    assert (min(o, c) - l) > 0.5 * (h - l)         # long lower wick
+    assert c < 99.0                                # ...but closed below support
+    assert _detect_sd_rejection(d, ind.atr(d)) is None
+
+
+def test_reclaiming_support_still_fires_a_buy():
+    d = _sd_frame([99.60, 100.00, 98.70, 99.80])
+    r = _detect_sd_rejection(d, ind.atr(d))
+    assert r is not None and r["direction"] == "buy"
+
+
+def test_direction_mapping_is_not_inverted():
+    """A demand rejection is a BUY at a swing LOW; supply is a SELL at a HIGH."""
+    d = _sd_frame([99.60, 100.00, 98.70, 99.80])
+    r = _detect_sd_rejection(d, ind.atr(d))
+    assert r["direction"] == "buy"
+    assert r["broken_level"] < r["confirm_price"]  # bought above the support
+
+
+# ── week 2/3 switches ────────────────────────────────────────────────────────
+@pytest.fixture
+def restore_switches():
+    saved = (C.SESSION_WEIGHTS_MODE, C.TIER_MODE, C.SL_DISTANCE_MULT,
+             C.TP_STRUCTURE_CHECK, C.SD_REQUIRE_LEVEL_UNBROKEN)
+    yield
+    (C.SESSION_WEIGHTS_MODE, C.TIER_MODE, C.SL_DISTANCE_MULT,
+     C.TP_STRUCTURE_CHECK, C.SD_REQUIRE_LEVEL_UNBROKEN) = saved
+
+
+def test_measured_session_weights_invert_new_york_and_london(restore_switches):
+    from strategy.market_sessions import session_score
+    ny = dt.datetime(2026, 7, 15, 14, 0)
+    ld = dt.datetime(2026, 7, 15, 9, 0)
+    C.SESSION_WEIGHTS_MODE = "v3"
+    assert session_score("index_sp_dow", ny) > session_score("index_sp_dow", ld)
+    C.SESSION_WEIGHTS_MODE = "measured"
+    assert session_score("index_sp_dow", ny) < session_score("index_sp_dow", ld)
+
+
+def test_defaults_are_unchanged_behaviour():
+    """Every week-2/3 switch ships off; this PR must not alter live output."""
+    assert C.SESSION_WEIGHTS_MODE == "v3"
+    assert C.TIER_MODE == "split"
+    assert C.SL_DISTANCE_MULT == 1.0
+    assert C.TP_STRUCTURE_CHECK is False
+    assert C.SD_REQUIRE_LEVEL_UNBROKEN is False
+
+
+def test_tighter_stop_keeps_the_target_and_raises_rr(restore_switches):
+    """The claim under test is 'winners never needed the room', so the target
+    price must stay put — scaling both would hold R:R at 2.0 and test nothing."""
+    d = {"pattern": "sd_rejection", "direction": "buy", "broken_level": 100.0,
+         "ref_low": 95.0, "ref_high": 110.0, "confirm_price": 103.0, "bonus": 5.0}
+    C.SL_DISTANCE_MULT = 1.0
+    full = _build_levels("BTCUSD", d, 10.0)
+    C.SL_DISTANCE_MULT = 0.85
+    tight = _build_levels("BTCUSD", d, 10.0)
+    assert tight["take_profit"] == pytest.approx(full["take_profit"])   # target fixed
+    assert abs(tight["entry"] - tight["stop_loss"]) < abs(full["entry"] - full["stop_loss"])
+    assert tight["rr"] > full["rr"]
+    assert tight["rr"] == pytest.approx(C.MIN_RR / 0.85, rel=1e-3)
+
+
+def test_breakeven_tracks_the_tightened_stop(restore_switches):
+    """BE is defined in units of actual risk, so it must move with the stop."""
+    d = {"pattern": "sd_rejection", "direction": "buy", "broken_level": 100.0,
+         "ref_low": 95.0, "ref_high": 110.0, "confirm_price": 103.0, "bonus": 5.0}
+    C.SL_DISTANCE_MULT = 0.85
+    lv = _build_levels("BTCUSD", d, 10.0)
+    risk = abs(lv["entry"] - lv["stop_loss"])
+    assert lv["breakeven_at"] == pytest.approx(lv["entry"] + risk * C.BREAKEVEN_AT_R)

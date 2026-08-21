@@ -139,6 +139,25 @@ SESSION_TABLES = {
         ((0, 0),   (7, 0),   2),   # Asia
     ],
 }
+# Measured weights. New York carries the biggest bonus (+10) and produced the
+# WORST results in both backtest runs (10-17% win rate); London carries +4/+3
+# and produced the best (43-46%); Asia +2 sits in between (35-44%). This table
+# inverts them to match what was measured. Selected by SESSION_WEIGHTS_MODE so
+# the change can be measured on its own before it becomes the default.
+SESSION_TABLES_MEASURED = {
+    "index_sp_dow": [
+        ((12, 30), (16, 0), 2),    # New York  — measured worst
+        ((7, 0),   (12, 30), 10),  # London    — measured best
+        ((0, 0),   (7, 0),   6),   # Asia
+    ],
+    "index_nasdaq": [
+        ((12, 30), (16, 0), 2),
+        ((7, 0),   (12, 30), 10),
+        ((0, 0),   (7, 0),   6),
+    ],
+}
+SESSION_WEIGHTS_MODE = "v3"        # "v3" (as designed) | "measured" (inverted)
+
 # BTC session handled separately in market_sessions.py
 BTC_US_OVERLAP_BONUS = 6
 BTC_EUROPE_BONUS     = 3
@@ -196,6 +215,28 @@ INSTRUMENTS = {
 # Measured fill rate by distance: <0.5 ATR -> 0.89, 0.5-1.0 -> 0.64,
 # 1.0-1.5 -> 0.74, 1.5+ -> 0.23. Beyond 1.5 ATR the setup expires unfilled
 # roughly three times in four. None disables the check.
+# A swing low is support only while price stays above it; once price closes
+# decisively below, the level is resistance and buying a retest from underneath
+# is backwards. Default off so the effect can be measured on its own.
+SD_REQUIRE_LEVEL_UNBROKEN = False
+
+# ── Week 2/3 experiments — all default to current behaviour ──────────────────
+# "split"   -> A+ and WATCH as today. "unified" -> one tier for everything.
+# A+ underperformed WATCH in three consecutive runs (3W/19L vs 18W/33L in the
+# last), so the label may be actively misleading rather than merely useless.
+TIER_MODE = "split"
+
+# Multiplier applied to the final stop distance. Winner MAE never exceeded
+# 0.78R while no loser's MFE reached 1.0R, so a tighter stop may keep every
+# winner while cutting every loss short — but "never exceeded" is an extreme
+# over 14 winners and one bad draw breaks it. Sweep before believing.
+SL_DISTANCE_MULT = 1.0
+
+# Reject a setup whose TP1 sits beyond the nearest opposing swing: the target
+# cannot be reached without first breaking a structure the market respected.
+# Nothing checks this today — TP1 is 2R of arithmetic and nothing else.
+TP_STRUCTURE_CHECK = False
+
 MAX_ENTRY_DIST_ATR = 1.5
 
 MIN_RR = 2.0
