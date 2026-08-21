@@ -152,9 +152,22 @@ def _detect_sd_rejection(df: pd.DataFrame, a: pd.Series) -> Optional[dict]:
     lower_wick = min(o, c) - l
     atr_now    = float(a.iloc[-1])
 
+    closes = df["close"].to_numpy()
     for i, lp in reversed(lows[-12:] if lows else []):
         if i >= last:
             continue
+        # RECLAIM: the candle must close back ABOVE the level. Without this a
+        # candle could close BELOW support and still fire a buy so long as it
+        # was merely green (c > o) — but a close below support means support
+        # failed, which is the opposite of a demand rejection.
+        if c <= lp:
+            continue
+        # LEVEL STILL SUPPORT: a swing low is support only while price is above
+        # it. Once price closes decisively below, that level becomes RESISTANCE,
+        # and buying a retest from underneath is exactly backwards.
+        if C.SD_REQUIRE_LEVEL_UNBROKEN and i + 1 < last:
+            if (closes[i + 1:last] < lp - 0.25 * atr_now).any():
+                continue
         if abs(l - lp) <= 0.5 * atr_now and lower_wick > 0.5 * rng and c > o:
             bonus = float(np.clip(lower_wick / rng * 10, 0, C.PATTERNS["sd_rejection"]["max_bonus"]))
             return {"direction": "buy", "pattern": "sd_rejection", "bonus": bonus,
@@ -162,6 +175,11 @@ def _detect_sd_rejection(df: pd.DataFrame, a: pd.Series) -> Optional[dict]:
     for i, hp in reversed(highs[-12:] if highs else []):
         if i >= last:
             continue
+        if c >= hp:                      # must close back BELOW resistance
+            continue
+        if C.SD_REQUIRE_LEVEL_UNBROKEN and i + 1 < last:
+            if (closes[i + 1:last] > hp + 0.25 * atr_now).any():
+                continue                 # resistance already broken — it is support now
         if abs(h - hp) <= 0.5 * atr_now and upper_wick > 0.5 * rng and c < o:
             bonus = float(np.clip(upper_wick / rng * 10, 0, C.PATTERNS["sd_rejection"]["max_bonus"]))
             return {"direction": "sell", "pattern": "sd_rejection", "bonus": bonus,
@@ -366,7 +384,12 @@ def _build_levels(epic: str, det: dict, atr_now: float) -> Optional[dict]:
     lo, hi   = cfg["atr_min"] * atr_now, cfg["atr_max"] * atr_now
     dist     = float(np.clip(dist, lo, hi))
     sl_clip  = "min" if raw_dist < lo - 1e-9 else ("max" if raw_dist > hi + 1e-9 else "none")
-    sl   = entry - dist if direction == "buy" else entry + dist
+    # The stop tightens but the TARGETS DO NOT MOVE. Scaling both would hold
+    # R:R at 2.0 and test nothing: the finding was that winners never needed
+    # the room (max MAE 0.78R), so the same target with less risk is the claim
+    # under test. R:R therefore becomes MIN_RR / mult.
+    sl_dist = dist * C.SL_DISTANCE_MULT
+    sl   = entry - sl_dist if direction == "buy" else entry + sl_dist
 
     tp1 = entry + dist * C.MIN_RR       if direction == "buy" else entry - dist * C.MIN_RR
     tp2 = entry + dist * (C.MIN_RR + 1) if direction == "buy" else entry - dist * (C.MIN_RR + 1)
@@ -375,8 +398,9 @@ def _build_levels(epic: str, det: dict, atr_now: float) -> Optional[dict]:
     # backtest had already run this far in favour before reversing into the stop.
     be = None
     if C.BREAKEVEN_ENABLED:
-        be = (entry + dist * C.BREAKEVEN_AT_R if direction == "buy"
-              else entry - dist * C.BREAKEVEN_AT_R)
+        # Measured in units of ACTUAL risk, so it tracks the tightened stop.
+        be = (entry + sl_dist * C.BREAKEVEN_AT_R if direction == "buy"
+              else entry - sl_dist * C.BREAKEVEN_AT_R)
     return {"entry": entry, "stop_loss": sl, "take_profit": tp1,
             "take_profit2": tp2, "rr": rr, "breakeven_at": be,
             "_diag": {"sl_clip": sl_clip,
@@ -514,12 +538,29 @@ class ScoringStrategy:
         score = int(round(f1 + f2 + f3 + f4 + add))
         if score < C.WATCH_MIN:
             return None
-        tier = "A+" if score >= self.a_plus_threshold else "WATCH"
+        # A+ underperformed WATCH in three consecutive runs, so "unified" drops
+        # the distinction rather than keep publishing a label that reads as a
+        # quality signal while measuring as the opposite.
+        tier = ("SIGNAL" if C.TIER_MODE == "unified"
+                else ("A+" if score >= self.a_plus_threshold else "WATCH"))
 
         levels = _build_levels(self.epic, det, atr_now)
         if levels is None:
             return None
         diag = levels.pop("_diag")
+        # A target beyond the nearest opposing swing cannot be reached without
+        # first breaking a level the market has already respected. Nothing
+        # checked this before: TP1 was 2R of arithmetic and nothing else.
+        if C.TP_STRUCTURE_CHECK:
+            sw_h, sw_l = ind.swings(df)
+            if direction == "buy":
+                blockers = [p for i, p in sw_h if p > levels["entry"]]
+                if blockers and min(blockers) < levels["take_profit"]:
+                    return None
+            else:
+                blockers = [p for i, p in sw_l if p < levels["entry"]]
+                if blockers and max(blockers) > levels["take_profit"]:
+                    return None
         # Setups whose limit sits far from price almost never fill: measured
         # fill rate 0.23 beyond 1.5 ATR versus 0.89 within 0.5 ATR. They burn a
         # daily-cap slot and an alert to expire unfilled three times in four.
