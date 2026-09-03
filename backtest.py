@@ -22,6 +22,7 @@ import datetime as dt
 import json
 import os
 import sys
+from collections import Counter
 
 from dotenv import load_dotenv
 
@@ -33,13 +34,19 @@ import pandas as pd
 from strategy import journal
 from strategy import strategy_config as C
 from strategy.capital_feed import CapitalComFeed
-from strategy.scoring_strategy import ScoringStrategy, MarketData
+from strategy.scoring_strategy import ScoringStrategy, MarketData, funnel_report
 
 WARMUP_BARS   = 80   # bars of history before the first evaluation
 COOLDOWN_BARS = 4    # mirror the live 4-hour per-market cooldown
+# Capital.com's /prices endpoint returns an EMPTY series above 1000 — not a
+# truncated one, and not an error. Measured: --bars 2000 produced "received 0"
+# for all four instruments while the run still exited 0 and uploaded an empty
+# artifact. Refuse the request instead of reporting a silent no-op as a result.
+MAX_BARS      = 1000
 
 
-def backtest_epic(feed: CapitalComFeed, epic: str, bars: int = 1000) -> list[dict]:
+def backtest_epic(feed: CapitalComFeed, epic: str,
+                  bars: int = 1000) -> tuple[list[dict], dict]:
     h1    = feed.get_candles("HOUR", bars)
     daily = feed.get_candles("DAY", 400)
     # Capital.com may silently cap `max` — log what actually came back so a
@@ -48,7 +55,7 @@ def backtest_epic(feed: CapitalComFeed, epic: str, bars: int = 1000) -> list[dic
           f"({len(daily)} daily)")
     if len(h1) < WARMUP_BARS + 10 or len(daily) < 70:
         print(f"  {epic}: not enough history ({len(h1)} H1 / {len(daily)} D)")
-        return []
+        return [], {}
     # Drop the still-forming candle on both timeframes (same as live).
     h1    = h1.iloc[:-1].reset_index(drop=True)
     daily = daily.iloc[:-1].reset_index(drop=True)
@@ -76,7 +83,7 @@ def backtest_epic(feed: CapitalComFeed, epic: str, bars: int = 1000) -> list[dic
         entry = journal.entry_from_signal(sig, now)
         journal.resolve(entry, h1.iloc[i + 1:])          # future candles only
         entries.append(entry)
-    return entries
+    return entries, strat.funnel
 
 
 def _expectancy(bucket: dict, rows: list[dict]) -> float | None:
@@ -91,6 +98,30 @@ def _json_default(o):
     if isinstance(o, (dt.datetime, dt.date, pd.Timestamp)):
         return o.isoformat()
     raise TypeError(f"not JSON serialisable: {type(o)}")
+
+
+def print_funnel(funnels: dict[str, dict]) -> None:
+    """Where candidates died, per instrument and in total.
+
+    Answers a question the outcome report cannot: a strategy that alerts twice
+    a week may be filtering hard or may simply be finding nothing, and those
+    have opposite fixes. Percentages are of bars that produced a pattern,
+    since bars with no pattern outnumber everything else several times over.
+    """
+    merged: Counter = Counter()
+    print("\n" + "=" * 64)
+    print("REJECTION FUNNEL — where candidates died")
+    print("=" * 64)
+    for epic, f in funnels.items():
+        if not f:
+            continue
+        merged.update(f)
+        print(f"  {epic}:")
+        print(funnel_report(f, indent="    "))
+    if len(funnels) > 1:
+        print("  ALL INSTRUMENTS:")
+        print(funnel_report(merged, indent="    "))
+    print("=" * 64)
 
 
 def print_report(all_entries: list[dict]) -> None:
@@ -136,6 +167,11 @@ def main() -> None:
                     help="session bonus table (default: config)")
     ap.add_argument("--tier-mode", choices=["split", "unified"], default=None,
                     help="A+/WATCH split or one tier (default: config)")
+    ap.add_argument("--watch-min", type=float, default=None,
+                    help="score threshold to publish a signal at all. The "
+                         "measured score does not rank outcomes, so this "
+                         "sweeps whether the gate buys any quality or only "
+                         "costs volume (default: config)")
     ap.add_argument("--sl-mult", type=float, default=None,
                     help="multiplier on the stop distance; targets do not move")
     ap.add_argument("--tp-structure", choices=["on", "off"], default=None,
@@ -150,6 +186,12 @@ def main() -> None:
                          "to compare them on identical history")
     args = ap.parse_args()
 
+    if args.bars > MAX_BARS:
+        sys.exit(f"--bars {args.bars} exceeds the {MAX_BARS}-bar ceiling the "
+                 f"price API enforces; above it the response is empty, not "
+                 f"truncated, and the run would report 'no signals' as though "
+                 f"the market were quiet.")
+
     if args.breakeven:
         C.BREAKEVEN_ENABLED = args.breakeven == "on"
     if args.sweep_bos:
@@ -160,6 +202,8 @@ def main() -> None:
         C.SESSION_WEIGHTS_MODE = args.session_weights
     if args.tier_mode:
         C.TIER_MODE = args.tier_mode
+    if args.watch_min is not None:
+        C.WATCH_MIN = args.watch_min
     if args.sl_mult is not None:
         C.SL_DISTANCE_MULT = args.sl_mult
     if args.tp_structure:
@@ -178,6 +222,7 @@ def main() -> None:
     print(f"  daily bias mode  : {C.DAILY_BIAS_MODE}")
     print(f"  session weights  : {C.SESSION_WEIGHTS_MODE}")
     print(f"  tier mode        : {C.TIER_MODE}")
+    print(f"  score threshold  : {C.WATCH_MIN}")
     print(f"  stop multiplier  : {C.SL_DISTANCE_MULT}  (targets fixed)")
     print(f"  TP structure chk : {'on' if C.TP_STRUCTURE_CHECK else 'off'}")
     print(f"  SD level unbroken: {'on' if C.SD_REQUIRE_LEVEL_UNBROKEN else 'off'}")
@@ -205,13 +250,23 @@ def main() -> None:
           "      so those fills are OPTIMISTIC by roughly the intervening move.\n")
 
     all_entries: list[dict] = []
+    funnels: dict[str, dict] = {}
     for epic in epics:
         print(f"Backtesting {epic} ...")
         feed = CapitalComFeed(cap_key, cap_id, cap_pw, epic=epic, demo=demo)
-        entries = backtest_epic(feed, epic, bars=args.bars)
+        entries, funnel = backtest_epic(feed, epic, bars=args.bars)
         print(f"  {epic}: {len(entries)} signals")
+        funnels[epic] = funnel
         all_entries.extend(entries)
+    print_funnel(funnels)
     print_report(all_entries)
+
+    # A run that produced nothing is a data failure, not a finding. Exiting 0
+    # here let a zero-entry run upload an empty artifact and read as success.
+    if not all_entries:
+        sys.exit("FAILED: no signals produced. Check the 'received N bars' "
+                 "lines above — an empty feed looks identical to a quiet "
+                 "market in every downstream report.")
 
     for e in all_entries:
         e["source"] = "backtest"

@@ -52,6 +52,10 @@ on:
         default: 'config'
         type: choice
         options: ['config', 'split', 'unified']
+      watch_min:
+        description: 'Score threshold to publish at all (blank = config, currently 72)'
+        required: false
+        default: ''
       sl_mult:
         description: 'Stop-distance multiplier, targets fixed (blank = config)'
         required: false
@@ -85,6 +89,13 @@ jobs:
   backtest:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+
+    # Every analysis step pipes into `tee`, and a pipeline's status is its LAST
+    # command — so without pipefail a python step that exits non-zero is masked
+    # by tee succeeding, and the job goes green on a run that produced nothing.
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
 
     steps:
       - name: Checkout code
@@ -130,6 +141,9 @@ jobs:
           fi
           if [ "${{ github.event.inputs.tier_mode }}" != "config" ]; then
             ARGS="$ARGS --tier-mode ${{ github.event.inputs.tier_mode }}"
+          fi
+          if [ -n "${{ github.event.inputs.watch_min }}" ]; then
+            ARGS="$ARGS --watch-min ${{ github.event.inputs.watch_min }}"
           fi
           if [ -n "${{ github.event.inputs.sl_mult }}" ]; then
             ARGS="$ARGS --sl-mult ${{ github.event.inputs.sl_mult }}"

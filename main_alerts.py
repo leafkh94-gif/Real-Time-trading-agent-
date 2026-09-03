@@ -21,6 +21,7 @@ import signal
 import sys
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, field, asdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -33,7 +34,7 @@ from core.log_sanitizer import setup_logging
 from strategy.capital_feed import CapitalComFeed
 from strategy import journal
 from strategy import strategy_config as C
-from strategy.scoring_strategy import ScoringStrategy, MarketData
+from strategy.scoring_strategy import ScoringStrategy, MarketData, funnel_report
 from strategy.market_sessions import index_market_open, in_news_blackout
 
 
@@ -69,6 +70,11 @@ class _Instrument:
 
 INSTRUMENTS = [_Instrument(e, C.INSTRUMENTS[e]["name"]) for e in WATCHLIST]
 
+# Gates that live outside the scoring engine: they reject a whole scan of an
+# instrument rather than a bar's candidate, so they are counted separately and
+# reported without a percentage. Drained into BotState after every scan.
+_LIVE_GATES: Counter = Counter()
+
 
 # ── Persistent bot state (daily caps + adaptive threshold) ─────────────────────
 @dataclass
@@ -86,6 +92,11 @@ class BotState:
     # turned one startup message per ~6h into one per 90 min.
     last_start_notify: float = 0.0     # epoch of last "bot started" message
     last_heartbeat: float = 0.0        # epoch of last daily check-in
+    # Today's rejection funnel. Persisted for the same reason as the two fields
+    # above: the bot exits every 90 minutes so the journal can upload, and a
+    # counter held in memory would restart from zero on every self-chain
+    # handoff — reporting a fraction of the day and reading as a quiet market.
+    funnel: dict = field(default_factory=dict)
 
     def roll_day(self, today: str, logger: logging.Logger) -> None:
         """Apply adaptive-threshold logic when the UTC day changes."""
@@ -106,6 +117,7 @@ class BotState:
         self.day = today
         self.a_plus_today = 0
         self.watch_today = 0
+        self.funnel = {}
 
     def can_send(self, tier: str) -> bool:
         if tier == "A+":
@@ -243,6 +255,24 @@ def _notify(notifier, html: str, plain: str) -> None:
         notifier.send(plain)
 
 
+# ── Rejection funnel ──────────────────────────────────────────────────────────
+def _drain_funnels(strategies, state, logger) -> None:
+    """Fold this scan's counters into the persisted daily funnel.
+
+    The engine counters are drained (not copied) so each strategy object holds
+    one scan at a time while BotState accumulates the day — otherwise every
+    scan would re-add the running total.
+    """
+    for strat in strategies.values():
+        for stage, n in strat.funnel.items():
+            state.funnel[stage] = state.funnel.get(stage, 0) + n
+        strat.funnel.clear()
+    for stage, n in _LIVE_GATES.items():
+        state.funnel[stage] = state.funnel.get(stage, 0) + n
+    _LIVE_GATES.clear()
+    logger.info("Funnel today:\n%s", funnel_report(state.funnel))
+
+
 # ── Heartbeat ─────────────────────────────────────────────────────────────────
 def _maybe_send_heartbeat(notifier, instruments, logger, state) -> None:
     """Daily 'still running' check-in. Timing lives in persisted state so it
@@ -254,8 +284,15 @@ def _maybe_send_heartbeat(notifier, instruments, logger, state) -> None:
         state.last_heartbeat = time.time()
         return
     markets = ", ".join(i.name for i in instruments)
+    # "No setups" on its own is indistinguishable from a broken bot. Naming the
+    # gate that rejected the most candidates makes a quiet day readable: a
+    # market with no patterns is a different situation from a market full of
+    # patterns that all failed one filter.
     html = ("🤖 <b>Alert bot — daily check-in</b>\n"
             f"<i>Watching: {markets}</i>\nNo setups in the last 24h — running normally.")
+    detail = funnel_report(state.funnel, indent="")
+    if state.funnel:
+        html += f"\n\n<b>Why nothing fired today</b>\n<code>{detail}</code>"
     _notify(notifier, html, html.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", ""))
     state.last_heartbeat = time.time()
     logger.info("Daily heartbeat sent")
@@ -265,10 +302,12 @@ def _maybe_send_heartbeat(notifier, instruments, logger, state) -> None:
 def _evaluate_one(instr, feed, strategy, logger, now):
     if instr.on_cooldown():
         logger.debug("%s: cooldown — skipping", instr.epic)
+        _LIVE_GATES["cooldown"] += 1
         return None
     cfg = C.INSTRUMENTS[instr.epic]
     if not cfg["always_open"] and not index_market_open(now):
         logger.debug("%s: index market closed — skipping", instr.epic)
+        _LIVE_GATES["market_closed"] += 1
         return None
     try:
         md = _load_market_data(feed, instr.epic, now)
@@ -276,6 +315,7 @@ def _evaluate_one(instr, feed, strategy, logger, now):
         return strategy.evaluate(md)
     except Exception as exc:
         logger.error("%s: evaluation error: %s", instr.epic, exc)
+        _LIVE_GATES["eval_error"] += 1
         return None
 
 
@@ -399,6 +439,7 @@ def main() -> None:
 
         if blackout and candidates:
             logger.info("News blackout active — suppressing %d candidate(s)", len(candidates))
+            _LIVE_GATES["news_blackout"] += len(candidates)
             candidates = {}
 
         # Correlation filter and inter-alert gap removed by request. Every
@@ -411,9 +452,12 @@ def main() -> None:
         for epic, sig in sorted(candidates.items(), key=lambda kv: -kv[1].score):
             if not state.can_send(sig.tier):
                 logger.info("%s: %s daily cap reached — skipping", epic, sig.tier)
+                _LIVE_GATES["daily_cap"] += 1
                 continue
             _send_alert(instr_by_epic[epic], sig, notifier, logger)
             state.record(sig.tier)
+
+        _drain_funnels(strategies, state, logger)
 
         # Resolve outcomes of past alerts against closed candles (the feedback loop)
         try:
