@@ -38,6 +38,11 @@ from strategy.scoring_strategy import ScoringStrategy, MarketData, funnel_report
 
 WARMUP_BARS   = 80   # bars of history before the first evaluation
 COOLDOWN_BARS = 4    # mirror the live 4-hour per-market cooldown
+# Capital.com's /prices endpoint returns an EMPTY series above 1000 — not a
+# truncated one, and not an error. Measured: --bars 2000 produced "received 0"
+# for all four instruments while the run still exited 0 and uploaded an empty
+# artifact. Refuse the request instead of reporting a silent no-op as a result.
+MAX_BARS      = 1000
 
 
 def backtest_epic(feed: CapitalComFeed, epic: str,
@@ -181,6 +186,12 @@ def main() -> None:
                          "to compare them on identical history")
     args = ap.parse_args()
 
+    if args.bars > MAX_BARS:
+        sys.exit(f"--bars {args.bars} exceeds the {MAX_BARS}-bar ceiling the "
+                 f"price API enforces; above it the response is empty, not "
+                 f"truncated, and the run would report 'no signals' as though "
+                 f"the market were quiet.")
+
     if args.breakeven:
         C.BREAKEVEN_ENABLED = args.breakeven == "on"
     if args.sweep_bos:
@@ -249,6 +260,13 @@ def main() -> None:
         all_entries.extend(entries)
     print_funnel(funnels)
     print_report(all_entries)
+
+    # A run that produced nothing is a data failure, not a finding. Exiting 0
+    # here let a zero-entry run upload an empty artifact and read as success.
+    if not all_entries:
+        sys.exit("FAILED: no signals produced. Check the 'received N bars' "
+                 "lines above — an empty feed looks identical to a quiet "
+                 "market in every downstream report.")
 
     for e in all_entries:
         e["source"] = "backtest"

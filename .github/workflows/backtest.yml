@@ -90,6 +90,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
+    # Every analysis step pipes into `tee`, and a pipeline's status is its LAST
+    # command — so without pipefail a python step that exits non-zero is masked
+    # by tee succeeding, and the job goes green on a run that produced nothing.
+    defaults:
+      run:
+        shell: bash -eo pipefail {0}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4.2.2
