@@ -15,6 +15,7 @@ Pipeline per instrument:
 from __future__ import annotations
 
 import datetime as dt
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -411,25 +412,85 @@ def _build_levels(epic: str, det: dict, atr_now: float) -> Optional[dict]:
 
 
 # ── Engine ───────────────────────────────────────────────────────────
+# Every way a candidate can die inside evaluate(), in pipeline order. Until
+# these were counted, "the bot is not sending" had no answer: nine silent
+# `return None` sites and no record of which one fired. The last entry is the
+# success path, so the tuple reads top to bottom as the funnel.
+REJECT_STAGES = (
+    "insufficient_history",   # not enough H1 or daily candles yet
+    "bad_atr",                # ATR non-finite or zero
+    "volatile_regime",        # ATR/price above the per-instrument ceiling
+    "no_pattern",             # no enabled detector matched this bar
+    "counter_trend",          # continuation pattern against the daily bias
+    "below_threshold",        # score < WATCH_MIN
+    "no_levels",              # entry/SL/TP could not be constructed
+    "tp_blocked",             # TP1 sits beyond the nearest opposing swing
+    "entry_too_far",          # limit further than MAX_ENTRY_DIST_ATR
+    "signal",                 # survived — an alert was produced
+)
+
+
+def funnel_report(counter, indent: str = "  ") -> str:
+    """Render a funnel Counter in pipeline order, skipping stages that never
+    fired.
+
+    Percentages are of bars that produced a pattern at all: bars with no
+    pattern outnumber everything else several times over, so including them
+    would push every real gate down to 1-2% and hide which one is binding.
+    Keys outside REJECT_STAGES (the live bot adds its own gates — cooldown,
+    market closed, daily cap) are printed after, as counts only, since they
+    apply to whole scans rather than to per-bar candidates.
+    """
+    lines = []
+    denom = sum(counter.get(k, 0) for k in REJECT_STAGES if k != "no_pattern")
+    for stage in REJECT_STAGES:
+        n = counter.get(stage, 0)
+        if not n:
+            continue
+        if stage == "no_pattern":
+            lines.append(f"{indent}{stage:<22}{n:>7}")
+        else:
+            pct = n / denom if denom else 0.0
+            lines.append(f"{indent}{stage:<22}{n:>7}{pct:>8.0%} of candidates")
+    for stage in sorted(k for k in counter if k not in REJECT_STAGES):
+        if counter[stage]:
+            lines.append(f"{indent}{stage:<22}{counter[stage]:>7}")
+    return "\n".join(lines) or f"{indent}(nothing evaluated)"
+
+
 class ScoringStrategy:
     def __init__(self, epic: str, a_plus_threshold: float | None = None):
         self.epic = epic
         self.cfg  = C.INSTRUMENTS[epic]
         self.a_plus_threshold = a_plus_threshold if a_plus_threshold is not None else C.A_PLUS_BASE
+        # Diagnostic only — never read by the scoring itself.
+        self.funnel: Counter = Counter()
+        self.last_reject: Optional[str] = None
+
+    def _reject(self, stage: str) -> None:
+        """Record why this bar produced nothing, then return None.
+
+        Returning the helper's own None keeps each exit a single line, so the
+        counter cannot drift out of sync with the control flow the way a
+        separate bookkeeping statement would."""
+        assert stage in REJECT_STAGES, stage
+        self.last_reject = stage
+        self.funnel[stage] += 1
+        return None
 
     def evaluate(self, md: MarketData) -> Optional[Signal]:
         df = md.h1
         if df is None or len(df) < 60 or md.daily is None or len(md.daily) < 60:
-            return None
+            return self._reject("insufficient_history")
         a       = ind.atr(df)
         atr_now = float(a.iloc[-1])
         if not np.isfinite(atr_now) or atr_now <= 0:
-            return None
+            return self._reject("bad_atr")
 
         # Volatile regime guard (v3): skip setup entirely if ATR/price exceeds threshold
         price_now = float(df["close"].iloc[-1])
         if atr_now / max(price_now, 1e-9) > self.cfg["volatile_atr_pct"]:
-            return None
+            return self._reject("volatile_regime")
 
         # Every detector runs, and the strongest candidate wins. Taking the
         # first match meant list order decided quality: `reversal` sits above
@@ -440,7 +501,7 @@ class ScoringStrategy:
                  if d and _pattern_enabled(d["pattern"])]
         det = max(cands, key=_pattern_quality) if cands else None
         if det is None:
-            return None
+            return self._reject("no_pattern")
         direction = det["direction"]
         pat       = C.PATTERNS[det["pattern"]]
 
@@ -467,7 +528,7 @@ class ScoringStrategy:
             if det["pattern"] not in C.COUNTER_TREND_PATTERNS:
                 # Continuation patterns (flag, sd_rejection, news_retest) never fight
                 # the daily trend — skip entirely rather than score low.
-                return None
+                return self._reject("counter_trend")
             # Reversal patterns may fire counter-trend but with the lighter penalty
             # so only the strongest setups can reach WATCH_MIN.
             f3 = C.BIAS_COUNTER_REVERSAL
@@ -537,7 +598,7 @@ class ScoringStrategy:
 
         score = int(round(f1 + f2 + f3 + f4 + add))
         if score < C.WATCH_MIN:
-            return None
+            return self._reject("below_threshold")
         # A+ underperformed WATCH in three consecutive runs, so "unified" drops
         # the distinction rather than keep publishing a label that reads as a
         # quality signal while measuring as the opposite.
@@ -546,7 +607,7 @@ class ScoringStrategy:
 
         levels = _build_levels(self.epic, det, atr_now)
         if levels is None:
-            return None
+            return self._reject("no_levels")
         diag = levels.pop("_diag")
         # A target beyond the nearest opposing swing cannot be reached without
         # first breaking a level the market has already respected. Nothing
@@ -556,17 +617,17 @@ class ScoringStrategy:
             if direction == "buy":
                 blockers = [p for i, p in sw_h if p > levels["entry"]]
                 if blockers and min(blockers) < levels["take_profit"]:
-                    return None
+                    return self._reject("tp_blocked")
             else:
                 blockers = [p for i, p in sw_l if p < levels["entry"]]
                 if blockers and max(blockers) > levels["take_profit"]:
-                    return None
+                    return self._reject("tp_blocked")
         # Setups whose limit sits far from price almost never fill: measured
         # fill rate 0.23 beyond 1.5 ATR versus 0.89 within 0.5 ATR. They burn a
         # daily-cap slot and an alert to expire unfilled three times in four.
         if (C.MAX_ENTRY_DIST_ATR is not None
                 and diag["entry_dist_atr"] > C.MAX_ENTRY_DIST_ATR):
-            return None
+            return self._reject("entry_too_far")
         if tier == "A+" and levels["rr"] < C.MIN_RR - 1e-6:
             tier = "WATCH"
 
@@ -596,6 +657,8 @@ class ScoringStrategy:
             **conf_raw,
         }
 
+        self.last_reject = None
+        self.funnel["signal"] += 1
         expiry = md.now_utc + dt.timedelta(minutes=C.SETUP_EXPIRY_MIN)
         return Signal(
             epic=self.epic, name=self.cfg["name"], direction=direction,
