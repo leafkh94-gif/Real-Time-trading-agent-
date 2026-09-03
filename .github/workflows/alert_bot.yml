@@ -1,18 +1,26 @@
 name: Trading Alert Bot
 
-# Reliable 24/7 coverage on a PUBLIC repo (unlimited free Actions minutes).
+# Coverage on a PUBLIC repo (unlimited free Actions minutes).
 #
 # How it works:
-#   * Each run executes longterm_bot.py, which scans every 30 min via its
-#     internal loop. The runner timeout ends the run; the self-chain restarts it.
+#   * Each run executes the bot, which scans every 30 min via its internal
+#     loop, then exits after MAX_RUNTIME_S so the journal artifact uploads.
 #   * Bot state + signal journal are carried across runs via actions/cache
 #     (cache keys are immutable, so each run saves a fresh key and the next
 #     run restores the newest via the restore-keys prefix).
-#   * At the end of each run a "self-chain" step triggers the next run via
-#     the GitHub API — guaranteed handoff with no gap.
-#   * The schedule cron is a recovery-only watchdog: if the chain ever dies,
-#     the next tick (worst-case ~60 min) restarts it automatically.
-#   * concurrency group prevents duplicate runners if cron and self-chain overlap.
+#   * THE CRON IS THE RESTART MECHANISM, not a watchdog. The self-chain step
+#     below has never once produced a run: GitHub deliberately does not create
+#     a workflow run from a workflow_dispatch made with the built-in
+#     GITHUB_TOKEN (recursion prevention). All 959 runs to date carry
+#     `event: schedule`; not one carries `event: workflow_dispatch` from the
+#     chain. The header used to claim "guaranteed handoff with no gap".
+#   * Because the cron is the real restart, MAX_RUNTIME_S sets the coverage.
+#     At 90 minutes the bot was UP for 90 min and then DOWN until the next
+#     cron tick actually fired — measured gaps of 46 min to 3h51m, roughly
+#     33% uptime. Scheduled workflows are best-effort and are routinely
+#     delayed well past the tick. The run duration now nearly spans the gap
+#     instead of relying on the tick being punctual.
+#   * concurrency group prevents duplicate runners if two triggers overlap.
 
 on:
   workflow_dispatch:        # manual start / restart from the Actions tab
@@ -26,7 +34,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 355     # hard ceiling; self-chain restarts after this
+    timeout-minutes: 355     # GitHub's job ceiling is 6h; stay under it
 
     steps:
       - name: Checkout code
@@ -64,7 +72,13 @@ jobs:
           # timeout, which cancels the run — every completed run so far shows
           # zero executed jobs and uploaded no journal. The self-chain restarts
           # immediately, so coverage is unaffected.
-          MAX_RUNTIME_S:       "5400"
+          # 5h30m, inside the 355-minute job timeout so the exit is graceful
+          # and the journal upload step still runs. Was 5400 (90 min), chosen
+          # so the journal uploaded often — but that traded a diagnostic
+          # artifact for two thirds of the bot's uptime, because nothing
+          # restarted it promptly. The journal now uploads every 5.5h instead,
+          # which is ample for something read once a day.
+          MAX_RUNTIME_S:       "19800"
 
       - name: Save bot state + signal journal
         if: always()
@@ -90,12 +104,27 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
-      - name: Self-chain — queue the next run immediately
+      # Kept, but it does NOT work with the built-in token and never has —
+      # GitHub suppresses workflow runs from a dispatch made with
+      # GITHUB_TOKEN. It is left in place because it starts working the moment
+      # a real PAT (repo + workflow scope) is stored as CHAIN_TOKEN, which
+      # would close the remaining gap between cron ticks. Until then the cron
+      # is the restart. What changed here is that it no longer LIES: `curl -s`
+      # with no status check printed "Next run queued." unconditionally, which
+      # is why a chain that had never fired looked healthy in every log.
+      - name: Self-chain — attempt to queue the next run
         if: always()
         run: |
-          curl -s -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          code=$(curl -s -o /tmp/chain.out -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${{ secrets.CHAIN_TOKEN || secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/alert_bot.yml/dispatches" \
-            -d '{"ref":"main"}'
-          echo "Next run queued."
+            -d '{"ref":"main"}')
+          echo "dispatch HTTP $code"
+          cat /tmp/chain.out || true
+          if [ "$code" != "204" ]; then
+            echo "::warning::Self-chain dispatch returned $code — the cron is the only restart."
+          else
+            echo "Dispatch accepted (204). NOTE: with GITHUB_TOKEN this still"
+            echo "produces no run; check for a new run before trusting it."
+          fi
