@@ -8,9 +8,26 @@ before they are trusted (especially everything for BTCUSD).
 from __future__ import annotations
 
 # ── Decision thresholds ───────────────────────────────────────────────────────
-# v3.2: raised by ~half the new order-flow bonus range (+8 max) so the anchored
-# VWAP / volume profile factors differentiate setups instead of inflating everything.
-WATCH_MIN      = 72      # 72–81  -> WATCH
+# v3.2 raised this to 72 by ~half the new order-flow bonus range, on the theory
+# that the anchored VWAP / volume-profile factors would differentiate setups.
+# Measured, they did not: the score sets a floor but does not rank above it.
+#
+# Threshold sweep, identical history and code, only this number moving:
+#     72 -> +0.062R/trade (78 signals)      62 -> +0.178R/trade (141 signals)
+#     67 -> +0.138R/trade (115 signals)     52 ->  0.000R/trade (193 signals)
+# The collapse at 52 is what rules out "the score is pure noise": it carries a
+# real floor near 62 and nothing above it. Per band, 62-66 and 67-71 both won
+# ~48%, while 72-75 — the first band the old gate accepted — won 15%.
+#
+# Replicated on US30+US100+BTCUSD alone (US500 excluded, since it was the one
+# instrument the analyser flagged as an outlier): -0.225R at 72 against
+# -0.024R at 62, a LARGER gain than with US500 included. The gate was the
+# problem, not one lucky instrument.
+#
+# Read the sign honestly: this turns a clearly losing configuration into
+# roughly break-even on three of four instruments. The positive total on the
+# full set came from US500 and does not replicate.
+WATCH_MIN      = 62      # 62–81  -> WATCH
 A_PLUS_BASE    = 82      # >=82   -> A+   (this one adapts)
 A_PLUS_FLOOR   = 68      # adaptive threshold never drops below this
 A_PLUS_CEIL    = 90      # adaptive threshold never rises above this
