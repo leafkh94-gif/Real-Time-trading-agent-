@@ -57,6 +57,22 @@ class CapitalComFeed:
                          self._epic, resolution, exc)
             return _EMPTY_DF.copy()
 
+    def search_markets(self, term: str) -> list:
+        """Return [{epic, name, type, status}] for markets matching `term`.
+
+        An epic is an account-specific identifier, not a ticker: "GER40" is a
+        perfectly plausible guess that Capital.com answers with a 404. At fetch
+        time that reads like an outage, and the instrument silently contributes
+        zero bars. This is how a new instrument's epic gets FOUND rather than
+        guessed, before it is written into the config.
+        """
+        r = self._request("GET", "/markets", params={"searchTerm": term})
+        return [{"epic":   m.get("epic", ""),
+                 "name":   m.get("instrumentName", ""),
+                 "type":   m.get("instrumentType", ""),
+                 "status": m.get("marketStatus", "")}
+                for m in r.json().get("markets", [])]
+
     def _fetch(self, resolution: str, max_count: int) -> list:
         """Fetch raw price rows from Capital.com prices endpoint."""
         r = self._request("GET", f"/prices/{self._epic}",

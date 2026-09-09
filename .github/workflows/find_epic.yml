@@ -1,0 +1,48 @@
+name: Find Epic
+
+# Manual only. Asks Capital.com what an instrument is actually called on this
+# account, before the name is written into strategy_config.
+#
+# This exists because GER40 was added by analogy and turned out not to be an
+# epic: the backtest reported "received 0 bars" and the instrument contributed
+# nothing while looking configured. Credentials are Actions secrets, so the
+# markets endpoint is only reachable from inside a workflow run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      terms:
+        description: 'Search terms, space separated (e.g. "dax germany")'
+        required: true
+        default: 'dax'
+
+defaults:
+  run:
+    shell: bash -eo pipefail {0}
+
+jobs:
+  find-epic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Search markets
+        env:
+          CAPITAL_API_KEY:    ${{ secrets.CAPITAL_API_KEY }}
+          CAPITAL_IDENTIFIER: ${{ secrets.CAPITAL_IDENTIFIER }}
+          CAPITAL_PASSWORD:   ${{ secrets.CAPITAL_PASSWORD }}
+          CAPITAL_DEMO:       'true'
+          # Via env, not interpolated into the script: workflow_dispatch input
+          # text expanded inline would run as shell.
+          TERMS: ${{ inputs.terms }}
+        run: python find_epic.py $TERMS
