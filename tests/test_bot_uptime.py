@@ -63,3 +63,48 @@ def test_the_self_chain_reports_its_own_failure():
     assert "http_code" in run, "dispatch status is not captured"
     assert "::warning::" in run, "a failed dispatch is not surfaced"
     assert "Next run queued." not in run, "still claims success unconditionally"
+
+
+# ── live vs measured watchlist ────────────────────────────────────────────
+#
+# GOLD measured 3W/19L over 1000 H1 bars — a 95% interval of 5-33% against a
+# 34% baseline. Keeping it in the backtest and out of the alerts is the whole
+# point of the "live" flag, and nothing else in the codebase enforces it.
+
+def test_watchlist_excludes_instruments_marked_not_live():
+    import importlib
+    import strategy.strategy_config as C
+
+    original = {e: cfg.get("live", True) for e, cfg in C.INSTRUMENTS.items()}
+    try:
+        epics = list(C.INSTRUMENTS)
+        C.INSTRUMENTS[epics[0]]["live"] = False
+        main_alerts = importlib.reload(importlib.import_module("main_alerts"))
+        assert epics[0] not in main_alerts.WATCHLIST
+        assert epics[1] in main_alerts.WATCHLIST
+    finally:
+        for e, was in original.items():
+            if was is True:
+                C.INSTRUMENTS[e].pop("live", None)
+            else:
+                C.INSTRUMENTS[e]["live"] = was
+        importlib.reload(importlib.import_module("main_alerts"))
+
+
+def test_an_instrument_without_the_flag_is_live():
+    # Every pre-existing instrument omits "live" entirely. If the default were
+    # False the bot would go silent on all of them.
+    import strategy.strategy_config as C
+    import main_alerts
+    for epic in ("US500", "US30", "US100", "BTCUSD"):
+        assert "live" not in C.INSTRUMENTS[epic]
+        assert epic in main_alerts.WATCHLIST
+
+
+def test_the_backtest_still_sees_the_measurement_only_instruments():
+    # The flag must not shrink the sample — that would delete the evidence
+    # that put the instrument on the bench in the first place.
+    import strategy.strategy_config as C
+    for epic in ("GOLD", "EURUSD", "GER40"):
+        assert C.INSTRUMENTS[epic]["live"] is False
+        assert epic in C.INSTRUMENTS

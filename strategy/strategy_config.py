@@ -282,16 +282,29 @@ INSTRUMENTS = {
     # names themselves, which show up as "received 0 bars" if wrong.
     "GOLD":   {"name": "Gold",       "asset": "metal",  "session": "index_sp_dow",
                "atr_max": 4.0, "atr_min": 2.0, "round_step": 50,    "round_prox": 0.0012,
+               # Measured 3W/19L on 1000 H1 bars: 95% interval 5-33%, which does
+               # not reach the 34% baseline — the only new instrument whose
+               # underperformance is larger than the sample noise. Stays in the
+               # backtest (it is evidence), stays out of the alerts.
+               "live": False,
                "volatile_atr_pct": 0.025,         # CALIBRATE
                "entry_mode": "bos_close",
                "correlated_group": None, "always_open": False},
     "EURUSD": {"name": "EUR/USD",    "asset": "fx",     "session": "europe",
                "atr_max": 4.0, "atr_min": 2.0, "round_step": 0.005, "round_prox": 0.0012,
+               # Measured 4W/14L. The interval (9-45%) still contains the
+               # baseline, so this is NOT proven bad — but a negative point
+               # estimate is not a reason to alert either. Gathering sample.
+               "live": False,
                "volatile_atr_pct": 0.012,         # CALIBRATE — FX ranges are tighter
                "entry_mode": "retrace_limit",
                "correlated_group": None, "always_open": False},
     "GER40":  {"name": "DAX 40",     "asset": "index",  "session": "europe",
                "atr_max": 4.0, "atr_min": 2.0, "round_step": 100,   "round_prox": 0.0012,
+               # Not an epic on this account — every request 404s and the run
+               # reports "received 0 bars". Off until find_epic.py returns the
+               # real name; live it would only spam the log with 404s.
+               "live": False,
                "volatile_atr_pct": 0.018,         # CALIBRATE
                "entry_mode": "bos_close",
                "correlated_group": "eu_indices", "always_open": False},

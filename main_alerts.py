@@ -52,7 +52,15 @@ STARTUP_NOTIFY_INTERVAL_S = 12 * 60 * 60
 STATE_FILE           = os.getenv("STATE_FILE", ".bot_state.json")
 
 # Watchlist is driven by the strategy config (single source of truth).
-WATCHLIST = list(C.INSTRUMENTS.keys())          # US500, US30, US100, BTCUSD
+#
+# "live": False keeps an instrument in the BACKTEST but out of the alerts. The
+# two questions are not the same one: an instrument earns a place in the sample
+# by returning data, and a place in your notifications by measuring at or above
+# break-even. Measured on 1000 H1 bars, GOLD came back 3W/19L — a 95% interval
+# of 5-33% that does not reach the 34% baseline — so alerting on it would be
+# knowingly sending losing trades, while dropping it entirely would throw away
+# the very sample that proved it.
+WATCHLIST = [e for e, cfg in C.INSTRUMENTS.items() if cfg.get("live", True)]
 
 
 @dataclass

@@ -256,6 +256,14 @@ def main() -> None:
               f"'{args.entry_mode}' for this run.\n")
 
     epics = [e for e in args.epics if e in C.INSTRUMENTS] or list(C.INSTRUMENTS)
+    # The backtest deliberately includes instruments the live bot does not
+    # alert on: that is how an instrument earns its way back in, or stays out.
+    # Printed because a report mixing the two without saying so would read as
+    # the live bot's expectancy and be wrong.
+    measured_only = [e for e in epics if not C.INSTRUMENTS[e].get("live", True)]
+    if measured_only:
+        print(f"  measurement-only  : {' '.join(measured_only)}  "
+              f"(in this report, NOT alerted live)")
     cap_key, cap_id, cap_pw = (os.getenv("CAPITAL_API_KEY", ""),
                                os.getenv("CAPITAL_IDENTIFIER", ""),
                                os.getenv("CAPITAL_PASSWORD", ""))
