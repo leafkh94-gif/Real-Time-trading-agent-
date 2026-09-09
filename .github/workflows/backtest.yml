@@ -34,6 +34,12 @@ on:
         default: 'config'
         type: choice
         options: ['config', 'on', 'off']
+      orb:
+        description: 'Opening Range Breakout pattern'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'on', 'off']
       round_bonus:
         description: 'Round-number bonus'
         required: false
@@ -139,6 +145,9 @@ jobs:
           fi
           if [ "${{ github.event.inputs.sweep_bos }}" != "config" ]; then
             ARGS="$ARGS --sweep-bos ${{ github.event.inputs.sweep_bos }}"
+          fi
+          if [ "${{ github.event.inputs.orb }}" != "config" ]; then
+            ARGS="$ARGS --orb ${{ github.event.inputs.orb }}"
           fi
           if [ "${{ github.event.inputs.round_bonus }}" != "config" ]; then
             ARGS="$ARGS --round-bonus ${{ github.event.inputs.round_bonus }}"

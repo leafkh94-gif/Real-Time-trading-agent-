@@ -55,7 +55,23 @@ PATTERNS = {
     "reversal":     {"base": 37, "max_bonus": 10, "type": "rejection", "label": "Double Top/Bottom / H&S"},
     "flag":         {"base": 36, "max_bonus": 8,  "type": "breakout",  "label": "Bull/Bear Flag"},
     "news_retest":  {"base": 34, "max_bonus": 8,  "type": "rejection", "label": "Post-News Retest"},
+    # Opening Range Breakout. The only rule in the engine tied to the market
+    # clock rather than to chart shape, and the only one with no judgement in
+    # it: range high, range low, close beyond one of them. Ships DISABLED —
+    # published write-ups disagree about whether it still works on indices, so
+    # it earns its place from our own 1000-bar measurement or not at all.
+    "orb":          {"base": 36, "max_bonus": 10, "type": "breakout", "label": "Opening Range Breakout",
+                     "enabled": False},
 }
+
+# ── Opening Range Breakout ───────────────────────────────────────────────────
+# ORB_RANGE_BARS is in H1 bars. A faithful ORB uses the opening 15-30 minutes;
+# this bot fetches hourly candles, so one bar is the finest opening range
+# available without adding an M15 feed. Coarser, but the same idea — and if the
+# idea shows no edge at H1 there is no case for building the finer plumbing.
+ORB_RANGE_BARS    = 1
+ORB_VALID_BARS    = 6     # a break this far past the open is not an opening move
+ORB_MIN_RANGE_ATR = 0.5   # a range tighter than this is noise, not balance
 
 # ── Factor 2 — technical confirmation (RSI + MACD + EMA20) ───────────────────
 # v3: needs ≥2 of 3 aligned for full bonus

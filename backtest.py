@@ -167,6 +167,8 @@ def main() -> None:
                     help="session bonus table (default: config)")
     ap.add_argument("--tier-mode", choices=["split", "unified"], default=None,
                     help="A+/WATCH split or one tier (default: config)")
+    ap.add_argument("--orb", choices=["on", "off"], default=None,
+                    help="Opening Range Breakout pattern (default: config)")
     ap.add_argument("--bias-tf", choices=["daily", "h4"], default=None,
                     help="which timeframe decides the trend (default: config)")
     ap.add_argument("--min-rr", type=float, default=None,
@@ -202,6 +204,8 @@ def main() -> None:
         C.BREAKEVEN_ENABLED = args.breakeven == "on"
     if args.sweep_bos:
         C.PATTERNS["sweep_bos"]["enabled"] = args.sweep_bos == "on"
+    if args.orb:
+        C.PATTERNS["orb"]["enabled"] = args.orb == "on"
     if args.bias_mode:
         C.DAILY_BIAS_MODE = args.bias_mode
     if args.session_weights:
@@ -228,6 +232,8 @@ def main() -> None:
     print("CONFIG FOR THIS RUN:")
     print(f"  break-even stop  : {'ON at +%.1fR' % C.BREAKEVEN_AT_R if C.BREAKEVEN_ENABLED else 'OFF'}")
     print(f"  sweep_bos pattern: {'enabled' if C.PATTERNS['sweep_bos'].get('enabled', True) else 'DISABLED'}")
+    print(f"  ORB pattern      : {'enabled' if C.PATTERNS['orb'].get('enabled', True) else 'DISABLED'}"
+          f"  (range {C.ORB_RANGE_BARS} H1 bar(s), valid {C.ORB_VALID_BARS})")
     print(f"  round-number bonus: {C.ROUND_NUMBER_BONUS} points")
     print(f"  daily bias mode  : {C.DAILY_BIAS_MODE}")
     print(f"  bias timeframe   : {C.BIAS_TIMEFRAME}"

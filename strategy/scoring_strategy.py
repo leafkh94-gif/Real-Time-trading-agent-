@@ -24,7 +24,7 @@ import pandas as pd
 
 from . import indicators as ind
 from . import strategy_config as C
-from .market_sessions import session_score, session_label
+from .market_sessions import _ET, session_score, session_label
 
 
 # ── Data contract ──────────────────────────────────────────────────
@@ -139,6 +139,69 @@ def _detect_flag(df: pd.DataFrame, a: pd.Series) -> Optional[dict]:
     return None
 
 
+def _detect_orb(df: pd.DataFrame, a: pd.Series) -> Optional[dict]:
+    """Opening Range Breakout — the session's first hour defines the range.
+
+    Every other detector here reads shape (wicks, impulses, swings). This one
+    reads THE CLOCK: the range is whatever the market printed in its first hour
+    of trading, and the signal is price leaving it. That makes it the only rule
+    in the engine tied to market open, which is exactly the gap the session
+    measurements kept pointing at.
+
+    Its appeal is that it has no judgement in it. Range high, range low, close
+    beyond one of them: nothing to interpret, so nothing to fool ourselves
+    with, and it either measures well or it does not.
+
+    Deliberately built on H1 first. A faithful ORB uses the opening 15 or 30
+    minutes, which needs M15 data this bot does not fetch. A one-hour opening
+    range is a coarser variant of the same idea, and it costs nothing to test.
+    If the idea shows no edge at H1 there is no case for building the M15
+    plumbing; if it does, that is when the finer data earns its keep.
+    """
+    if "time" not in df.columns or len(df) < 6:
+        return None
+    t = df["time"]
+    if pd.isna(t.iloc[-1]):
+        return None
+    # Session day in New York time — the open that matters for US indices, and
+    # DST-aware so the range does not drift by an hour twice a year.
+    et = t.dt.tz_localize("UTC").dt.tz_convert(_ET)
+    today = et.iloc[-1].date()
+    in_session = (et.dt.date == today) & (et.dt.hour >= 9) & (et.dt.hour < 16)
+    idx = list(np.where(in_session.to_numpy())[0])
+    n_range = C.ORB_RANGE_BARS
+    if len(idx) <= n_range:          # range not complete, or nothing to break out of
+        return None
+    rng, rest = idx[:n_range], idx[n_range:]
+    if rest[-1] != len(df) - 1:      # the breakout must be THIS bar
+        return None
+    if len(rest) > C.ORB_VALID_BARS:  # too late in the session to call it an open
+        return None
+
+    hi = float(df["high"].iloc[rng].max())
+    lo = float(df["low"].iloc[rng].min())
+    atr_now = float(a.iloc[-1])
+    width = hi - lo
+    if atr_now <= 0 or width < C.ORB_MIN_RANGE_ATR * atr_now:
+        return None                  # a range this tight is noise, not balance
+
+    last = float(df["close"].iloc[-1])
+    prev = float(df["close"].iloc[-2])
+    # Bonus scales with how decisively the range was left, capped by config.
+    cap = C.PATTERNS["orb"]["max_bonus"]
+    if last > hi >= prev:
+        bonus = float(np.clip((last - hi) / atr_now * 4, 0, cap))
+        return {"direction": "buy", "pattern": "orb", "bonus": bonus,
+                "broken_level": hi, "ref_low": lo, "ref_high": last,
+                "confirm_price": last}
+    if last < lo <= prev:
+        bonus = float(np.clip((lo - last) / atr_now * 4, 0, cap))
+        return {"direction": "sell", "pattern": "orb", "bonus": bonus,
+                "broken_level": lo, "ref_low": last, "ref_high": hi,
+                "confirm_price": last}
+    return None
+
+
 def _detect_sd_rejection(df: pd.DataFrame, a: pd.Series) -> Optional[dict]:
     """Price reaches a prior swing level and prints a rejection wick."""
     highs, lows = ind.swings(df)
@@ -246,7 +309,7 @@ def _detect_news_retest(df: pd.DataFrame, a: pd.Series) -> Optional[dict]:
 
 
 _DETECTORS = [_detect_sweep_bos, _detect_reversal, _detect_sd_rejection,
-              _detect_flag, _detect_news_retest]
+              _detect_flag, _detect_news_retest, _detect_orb]
 
 
 def _pattern_quality(det: dict) -> float:
