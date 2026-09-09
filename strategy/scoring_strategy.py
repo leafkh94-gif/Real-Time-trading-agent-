@@ -285,17 +285,18 @@ def _technical_confirmation(df: pd.DataFrame, direction: str) -> tuple[int, list
     return pts, agree, raw
 
 
-def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
-    """Factor 3 — daily EMA50/200 trend direction."""
-    close  = daily["close"]
-    e50    = float(ind.ema(close, C.EMA_FAST_BIAS).iloc[-1])
-    e200   = float(ind.ema(close, C.EMA_SLOW_BIAS).iloc[-1])
+def _bias_from(close: pd.Series, direction: str,
+               fast: int, slow: int, medium: int) -> tuple[int, str]:
+    """Trend score from one price series. Timeframe-agnostic: the caller
+    decides whether this is a daily or a four-hour close."""
+    e_fast = float(ind.ema(close, fast).iloc[-1])
+    e_slow = float(ind.ema(close, slow).iloc[-1])
     price  = float(close.iloc[-1])
-    spread = abs(e50 - e200) / max(price, 1e-9)
+    spread = abs(e_fast - e_slow) / max(price, 1e-9)
     if spread < 0.001:
         return C.BIAS_NEUTRAL, "neutral"
-    up   = e50 > e200 and price > e200
-    down = e50 < e200 and price < e200
+    up   = e_fast > e_slow and price > e_slow
+    down = e_fast < e_slow and price < e_slow
     if up   and direction == "buy":  return C.BIAS_ALIGNED, "aligned-up"
     if down and direction == "sell": return C.BIAS_ALIGNED, "aligned-down"
 
@@ -307,14 +308,59 @@ def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
             # layer alone cannot tell those apart — EMA200 daily still reads
             # "up" weeks into a genuine decline, which is why bearish setups
             # were being banned throughout every pullback.
-            e20 = float(ind.ema(close, C.EMA_MEDIUM_BIAS).iloc[-1])
-            medium_down = e20 < e50
-            medium_up   = e20 > e50
+            e_med = float(ind.ema(close, medium).iloc[-1])
+            medium_down = e_med < e_fast
+            medium_up   = e_med > e_fast
             if ((up and direction == "sell" and medium_down) or
                     (down and direction == "buy" and medium_up)):
                 return C.BIAS_CORRECTION, "correction"
         return C.BIAS_COUNTER, "counter-trend"
     return C.BIAS_NEUTRAL, "neutral"
+
+
+def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
+    """Factor 3 on the daily chart — EMA50/200."""
+    return _bias_from(daily["close"], direction,
+                      C.EMA_FAST_BIAS, C.EMA_SLOW_BIAS, C.EMA_MEDIUM_BIAS)
+
+
+def _resample_h4(h1: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """Four-hour candles derived from the H1 series.
+
+    Derived rather than fetched: it costs no extra API call, and the two
+    timeframes cannot disagree about the same hour the way two separate
+    downloads can. The final bar may be partial — that is what a live chart
+    shows too, and both the backtest and the bot see the same shape.
+    """
+    if "time" not in h1.columns or len(h1) < 8:
+        return None
+    df = h1.dropna(subset=["time"]).set_index("time").sort_index()
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    out = df.resample("4h", label="left", closed="left").agg(agg).dropna()
+    return out.reset_index() if len(out) else None
+
+
+def _trend_bias(md: "MarketData", direction: str) -> tuple[int, str, str]:
+    """Factor 3 — trend direction, from the daily chart or from H4.
+
+    The daily EMA50/200 is very slow: on a daily chart EMA200 still reads "up"
+    weeks into a real decline, which is why 84% of trades were buys and why
+    counter_trend was rejecting 30% of every candidate found. Four-hour bars
+    with EMA20/50 span roughly the same calendar window as daily EMA3/8, so
+    the read turns with the market instead of lagging it by a month.
+
+    Returns the source alongside the score: when H4 history is too short the
+    daily read decides, and a report that could not tell which one spoke would
+    make the comparison meaningless.
+    """
+    if getattr(C, "BIAS_TIMEFRAME", "daily") == "h4":
+        h4 = _resample_h4(md.h1)
+        if h4 is not None and len(h4) >= C.EMA_SLOW_H4 + 10:
+            pts, state = _bias_from(h4["close"], direction,
+                                    C.EMA_FAST_H4, C.EMA_SLOW_H4, C.EMA_MEDIUM_H4)
+            return pts, state, "h4"
+    pts, state = _daily_bias(md.daily, direction)
+    return pts, state, "daily"
 
 
 def _choppy(df: pd.DataFrame) -> tuple[bool, float]:
@@ -523,7 +569,7 @@ class ScoringStrategy:
             reasons.append("Confirm: " + ", ".join(agree))
 
         # Factor 3 — daily bias
-        f3, bias_state = _daily_bias(md.daily, direction)
+        f3, bias_state, bias_src = _trend_bias(md, direction)
         if bias_state == "counter-trend":
             if det["pattern"] not in C.COUNTER_TREND_PATTERNS:
                 # Continuation patterns (flag, sd_rejection, news_retest) never fight
@@ -635,6 +681,7 @@ class ScoringStrategy:
         # journal can later explain WHY a trade won or lost.
         context = {
             "bias_state":       bias_state,
+            "bias_source":      bias_src,
             "adx":              round(adx_val, 2),
             "atr":              round(atr_now, 4),
             "atr_pct":          round(atr_now / max(price_now, 1e-9), 5),

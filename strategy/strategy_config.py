@@ -77,6 +77,21 @@ BIAS_COUNTER_REVERSAL = -8    # reversal patterns — allowed with penalty
 EMA_FAST_BIAS = 50
 EMA_SLOW_BIAS = 200
 
+# ── Which timeframe decides the trend ────────────────────────────────────────
+# "daily" -> EMA50/200 on daily candles (original). Measured consequence: 84%
+#            of all trades were buys, and counter_trend rejected 30% of every
+#            candidate the detectors found. Daily EMA200 still reads "up" weeks
+#            into a real decline, so bearish setups are banned through every
+#            pullback.
+# "h4"     -> EMA20/50 on four-hour candles resampled from the H1 series. Spans
+#            roughly the same calendar window as daily EMA3/8, so the read
+#            turns with the market rather than a month behind it.
+# Default stays "daily": this ships as a switch to be measured, not a change.
+BIAS_TIMEFRAME  = "daily"
+EMA_FAST_H4     = 20
+EMA_SLOW_H4     = 50
+EMA_MEDIUM_H4   = 10   # graduated mode's medium layer, in H4 bars
+
 # ── Daily bias mode ───────────────────────────────────────────────────────────
 # "strict"    -> current behaviour. A continuation pattern against the daily
 #                trend is dropped outright (`return None`), which in a long

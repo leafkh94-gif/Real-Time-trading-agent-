@@ -52,6 +52,12 @@ on:
         default: 'config'
         type: choice
         options: ['config', 'split', 'unified']
+      bias_tf:
+        description: 'Which timeframe decides the trend'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'daily', 'h4']
       min_rr:
         description: 'Where TP1 sits in R (blank = config, currently 2.0). Lower = smaller, faster targets'
         required: false
@@ -145,6 +151,9 @@ jobs:
           fi
           if [ "${{ github.event.inputs.tier_mode }}" != "config" ]; then
             ARGS="$ARGS --tier-mode ${{ github.event.inputs.tier_mode }}"
+          fi
+          if [ "${{ github.event.inputs.bias_tf }}" != "config" ]; then
+            ARGS="$ARGS --bias-tf ${{ github.event.inputs.bias_tf }}"
           fi
           if [ -n "${{ github.event.inputs.min_rr }}" ]; then
             ARGS="$ARGS --min-rr ${{ github.event.inputs.min_rr }}"

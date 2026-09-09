@@ -167,6 +167,8 @@ def main() -> None:
                     help="session bonus table (default: config)")
     ap.add_argument("--tier-mode", choices=["split", "unified"], default=None,
                     help="A+/WATCH split or one tier (default: config)")
+    ap.add_argument("--bias-tf", choices=["daily", "h4"], default=None,
+                    help="which timeframe decides the trend (default: config)")
     ap.add_argument("--min-rr", type=float, default=None,
                     help="where TP1 sits, in R. Lower = hit more often but "
                          "each win pays less; break-even win rate is "
@@ -210,6 +212,8 @@ def main() -> None:
         C.WATCH_MIN = args.watch_min
     if args.min_rr is not None:
         C.MIN_RR = args.min_rr
+    if args.bias_tf:
+        C.BIAS_TIMEFRAME = args.bias_tf
     if args.sl_mult is not None:
         C.SL_DISTANCE_MULT = args.sl_mult
     if args.tp_structure:
@@ -226,6 +230,10 @@ def main() -> None:
     print(f"  sweep_bos pattern: {'enabled' if C.PATTERNS['sweep_bos'].get('enabled', True) else 'DISABLED'}")
     print(f"  round-number bonus: {C.ROUND_NUMBER_BONUS} points")
     print(f"  daily bias mode  : {C.DAILY_BIAS_MODE}")
+    print(f"  bias timeframe   : {C.BIAS_TIMEFRAME}"
+          + (f"  (EMA{C.EMA_FAST_H4}/{C.EMA_SLOW_H4} on H4)"
+             if C.BIAS_TIMEFRAME == "h4"
+             else f"  (EMA{C.EMA_FAST_BIAS}/{C.EMA_SLOW_BIAS} on daily)"))
     print(f"  session weights  : {C.SESSION_WEIGHTS_MODE}")
     print(f"  tier mode        : {C.TIER_MODE}")
     print(f"  score threshold  : {C.WATCH_MIN}")
