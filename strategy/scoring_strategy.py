@@ -24,7 +24,7 @@ import pandas as pd
 
 from . import indicators as ind
 from . import strategy_config as C
-from .market_sessions import session_score, session_label
+from .market_sessions import _ET, session_score, session_label
 
 
 # ── Data contract ──────────────────────────────────────────────────
@@ -139,6 +139,69 @@ def _detect_flag(df: pd.DataFrame, a: pd.Series) -> Optional[dict]:
     return None
 
 
+def _detect_orb(df: pd.DataFrame, a: pd.Series) -> Optional[dict]:
+    """Opening Range Breakout — the session's first hour defines the range.
+
+    Every other detector here reads shape (wicks, impulses, swings). This one
+    reads THE CLOCK: the range is whatever the market printed in its first hour
+    of trading, and the signal is price leaving it. That makes it the only rule
+    in the engine tied to market open, which is exactly the gap the session
+    measurements kept pointing at.
+
+    Its appeal is that it has no judgement in it. Range high, range low, close
+    beyond one of them: nothing to interpret, so nothing to fool ourselves
+    with, and it either measures well or it does not.
+
+    Deliberately built on H1 first. A faithful ORB uses the opening 15 or 30
+    minutes, which needs M15 data this bot does not fetch. A one-hour opening
+    range is a coarser variant of the same idea, and it costs nothing to test.
+    If the idea shows no edge at H1 there is no case for building the M15
+    plumbing; if it does, that is when the finer data earns its keep.
+    """
+    if "time" not in df.columns or len(df) < 6:
+        return None
+    t = df["time"]
+    if pd.isna(t.iloc[-1]):
+        return None
+    # Session day in New York time — the open that matters for US indices, and
+    # DST-aware so the range does not drift by an hour twice a year.
+    et = t.dt.tz_localize("UTC").dt.tz_convert(_ET)
+    today = et.iloc[-1].date()
+    in_session = (et.dt.date == today) & (et.dt.hour >= 9) & (et.dt.hour < 16)
+    idx = list(np.where(in_session.to_numpy())[0])
+    n_range = C.ORB_RANGE_BARS
+    if len(idx) <= n_range:          # range not complete, or nothing to break out of
+        return None
+    rng, rest = idx[:n_range], idx[n_range:]
+    if rest[-1] != len(df) - 1:      # the breakout must be THIS bar
+        return None
+    if len(rest) > C.ORB_VALID_BARS:  # too late in the session to call it an open
+        return None
+
+    hi = float(df["high"].iloc[rng].max())
+    lo = float(df["low"].iloc[rng].min())
+    atr_now = float(a.iloc[-1])
+    width = hi - lo
+    if atr_now <= 0 or width < C.ORB_MIN_RANGE_ATR * atr_now:
+        return None                  # a range this tight is noise, not balance
+
+    last = float(df["close"].iloc[-1])
+    prev = float(df["close"].iloc[-2])
+    # Bonus scales with how decisively the range was left, capped by config.
+    cap = C.PATTERNS["orb"]["max_bonus"]
+    if last > hi >= prev:
+        bonus = float(np.clip((last - hi) / atr_now * 4, 0, cap))
+        return {"direction": "buy", "pattern": "orb", "bonus": bonus,
+                "broken_level": hi, "ref_low": lo, "ref_high": last,
+                "confirm_price": last}
+    if last < lo <= prev:
+        bonus = float(np.clip((lo - last) / atr_now * 4, 0, cap))
+        return {"direction": "sell", "pattern": "orb", "bonus": bonus,
+                "broken_level": lo, "ref_low": last, "ref_high": hi,
+                "confirm_price": last}
+    return None
+
+
 def _detect_sd_rejection(df: pd.DataFrame, a: pd.Series) -> Optional[dict]:
     """Price reaches a prior swing level and prints a rejection wick."""
     highs, lows = ind.swings(df)
@@ -246,7 +309,7 @@ def _detect_news_retest(df: pd.DataFrame, a: pd.Series) -> Optional[dict]:
 
 
 _DETECTORS = [_detect_sweep_bos, _detect_reversal, _detect_sd_rejection,
-              _detect_flag, _detect_news_retest]
+              _detect_flag, _detect_news_retest, _detect_orb]
 
 
 def _pattern_quality(det: dict) -> float:
@@ -285,17 +348,18 @@ def _technical_confirmation(df: pd.DataFrame, direction: str) -> tuple[int, list
     return pts, agree, raw
 
 
-def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
-    """Factor 3 — daily EMA50/200 trend direction."""
-    close  = daily["close"]
-    e50    = float(ind.ema(close, C.EMA_FAST_BIAS).iloc[-1])
-    e200   = float(ind.ema(close, C.EMA_SLOW_BIAS).iloc[-1])
+def _bias_from(close: pd.Series, direction: str,
+               fast: int, slow: int, medium: int) -> tuple[int, str]:
+    """Trend score from one price series. Timeframe-agnostic: the caller
+    decides whether this is a daily or a four-hour close."""
+    e_fast = float(ind.ema(close, fast).iloc[-1])
+    e_slow = float(ind.ema(close, slow).iloc[-1])
     price  = float(close.iloc[-1])
-    spread = abs(e50 - e200) / max(price, 1e-9)
+    spread = abs(e_fast - e_slow) / max(price, 1e-9)
     if spread < 0.001:
         return C.BIAS_NEUTRAL, "neutral"
-    up   = e50 > e200 and price > e200
-    down = e50 < e200 and price < e200
+    up   = e_fast > e_slow and price > e_slow
+    down = e_fast < e_slow and price < e_slow
     if up   and direction == "buy":  return C.BIAS_ALIGNED, "aligned-up"
     if down and direction == "sell": return C.BIAS_ALIGNED, "aligned-down"
 
@@ -307,14 +371,59 @@ def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
             # layer alone cannot tell those apart — EMA200 daily still reads
             # "up" weeks into a genuine decline, which is why bearish setups
             # were being banned throughout every pullback.
-            e20 = float(ind.ema(close, C.EMA_MEDIUM_BIAS).iloc[-1])
-            medium_down = e20 < e50
-            medium_up   = e20 > e50
+            e_med = float(ind.ema(close, medium).iloc[-1])
+            medium_down = e_med < e_fast
+            medium_up   = e_med > e_fast
             if ((up and direction == "sell" and medium_down) or
                     (down and direction == "buy" and medium_up)):
                 return C.BIAS_CORRECTION, "correction"
         return C.BIAS_COUNTER, "counter-trend"
     return C.BIAS_NEUTRAL, "neutral"
+
+
+def _daily_bias(daily: pd.DataFrame, direction: str) -> tuple[int, str]:
+    """Factor 3 on the daily chart — EMA50/200."""
+    return _bias_from(daily["close"], direction,
+                      C.EMA_FAST_BIAS, C.EMA_SLOW_BIAS, C.EMA_MEDIUM_BIAS)
+
+
+def _resample_h4(h1: pd.DataFrame) -> Optional[pd.DataFrame]:
+    """Four-hour candles derived from the H1 series.
+
+    Derived rather than fetched: it costs no extra API call, and the two
+    timeframes cannot disagree about the same hour the way two separate
+    downloads can. The final bar may be partial — that is what a live chart
+    shows too, and both the backtest and the bot see the same shape.
+    """
+    if "time" not in h1.columns or len(h1) < 8:
+        return None
+    df = h1.dropna(subset=["time"]).set_index("time").sort_index()
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    out = df.resample("4h", label="left", closed="left").agg(agg).dropna()
+    return out.reset_index() if len(out) else None
+
+
+def _trend_bias(md: "MarketData", direction: str) -> tuple[int, str, str]:
+    """Factor 3 — trend direction, from the daily chart or from H4.
+
+    The daily EMA50/200 is very slow: on a daily chart EMA200 still reads "up"
+    weeks into a real decline, which is why 84% of trades were buys and why
+    counter_trend was rejecting 30% of every candidate found. Four-hour bars
+    with EMA20/50 span roughly the same calendar window as daily EMA3/8, so
+    the read turns with the market instead of lagging it by a month.
+
+    Returns the source alongside the score: when H4 history is too short the
+    daily read decides, and a report that could not tell which one spoke would
+    make the comparison meaningless.
+    """
+    if getattr(C, "BIAS_TIMEFRAME", "daily") == "h4":
+        h4 = _resample_h4(md.h1)
+        if h4 is not None and len(h4) >= C.EMA_SLOW_H4 + 10:
+            pts, state = _bias_from(h4["close"], direction,
+                                    C.EMA_FAST_H4, C.EMA_SLOW_H4, C.EMA_MEDIUM_H4)
+            return pts, state, "h4"
+    pts, state = _daily_bias(md.daily, direction)
+    return pts, state, "daily"
 
 
 def _choppy(df: pd.DataFrame) -> tuple[bool, float]:
@@ -523,7 +632,7 @@ class ScoringStrategy:
             reasons.append("Confirm: " + ", ".join(agree))
 
         # Factor 3 — daily bias
-        f3, bias_state = _daily_bias(md.daily, direction)
+        f3, bias_state, bias_src = _trend_bias(md, direction)
         if bias_state == "counter-trend":
             if det["pattern"] not in C.COUNTER_TREND_PATTERNS:
                 # Continuation patterns (flag, sd_rejection, news_retest) never fight
@@ -635,6 +744,7 @@ class ScoringStrategy:
         # journal can later explain WHY a trade won or lost.
         context = {
             "bias_state":       bias_state,
+            "bias_source":      bias_src,
             "adx":              round(adx_val, 2),
             "atr":              round(atr_now, 4),
             "atr_pct":          round(atr_now / max(price_now, 1e-9), 5),

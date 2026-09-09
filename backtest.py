@@ -167,6 +167,14 @@ def main() -> None:
                     help="session bonus table (default: config)")
     ap.add_argument("--tier-mode", choices=["split", "unified"], default=None,
                     help="A+/WATCH split or one tier (default: config)")
+    ap.add_argument("--orb", choices=["on", "off"], default=None,
+                    help="Opening Range Breakout pattern (default: config)")
+    ap.add_argument("--bias-tf", choices=["daily", "h4"], default=None,
+                    help="which timeframe decides the trend (default: config)")
+    ap.add_argument("--min-rr", type=float, default=None,
+                    help="where TP1 sits, in R. Lower = hit more often but "
+                         "each win pays less; break-even win rate is "
+                         "1/(1+RR). TP2 stays one R above TP1")
     ap.add_argument("--watch-min", type=float, default=None,
                     help="score threshold to publish a signal at all. The "
                          "measured score does not rank outcomes, so this "
@@ -196,6 +204,8 @@ def main() -> None:
         C.BREAKEVEN_ENABLED = args.breakeven == "on"
     if args.sweep_bos:
         C.PATTERNS["sweep_bos"]["enabled"] = args.sweep_bos == "on"
+    if args.orb:
+        C.PATTERNS["orb"]["enabled"] = args.orb == "on"
     if args.bias_mode:
         C.DAILY_BIAS_MODE = args.bias_mode
     if args.session_weights:
@@ -204,6 +214,10 @@ def main() -> None:
         C.TIER_MODE = args.tier_mode
     if args.watch_min is not None:
         C.WATCH_MIN = args.watch_min
+    if args.min_rr is not None:
+        C.MIN_RR = args.min_rr
+    if args.bias_tf:
+        C.BIAS_TIMEFRAME = args.bias_tf
     if args.sl_mult is not None:
         C.SL_DISTANCE_MULT = args.sl_mult
     if args.tp_structure:
@@ -218,11 +232,19 @@ def main() -> None:
     print("CONFIG FOR THIS RUN:")
     print(f"  break-even stop  : {'ON at +%.1fR' % C.BREAKEVEN_AT_R if C.BREAKEVEN_ENABLED else 'OFF'}")
     print(f"  sweep_bos pattern: {'enabled' if C.PATTERNS['sweep_bos'].get('enabled', True) else 'DISABLED'}")
+    print(f"  ORB pattern      : {'enabled' if C.PATTERNS['orb'].get('enabled', True) else 'DISABLED'}"
+          f"  (range {C.ORB_RANGE_BARS} H1 bar(s), valid {C.ORB_VALID_BARS})")
     print(f"  round-number bonus: {C.ROUND_NUMBER_BONUS} points")
     print(f"  daily bias mode  : {C.DAILY_BIAS_MODE}")
+    print(f"  bias timeframe   : {C.BIAS_TIMEFRAME}"
+          + (f"  (EMA{C.EMA_FAST_H4}/{C.EMA_SLOW_H4} on H4)"
+             if C.BIAS_TIMEFRAME == "h4"
+             else f"  (EMA{C.EMA_FAST_BIAS}/{C.EMA_SLOW_BIAS} on daily)"))
     print(f"  session weights  : {C.SESSION_WEIGHTS_MODE}")
     print(f"  tier mode        : {C.TIER_MODE}")
     print(f"  score threshold  : {C.WATCH_MIN}")
+    print(f"  TP1 at           : {C.MIN_RR}R  (break-even win rate "
+          f"{1 / (1 + C.MIN_RR):.0%})")
     print(f"  stop multiplier  : {C.SL_DISTANCE_MULT}  (targets fixed)")
     print(f"  TP structure chk : {'on' if C.TP_STRUCTURE_CHECK else 'off'}")
     print(f"  SD level unbroken: {'on' if C.SD_REQUIRE_LEVEL_UNBROKEN else 'off'}")
@@ -234,6 +256,14 @@ def main() -> None:
               f"'{args.entry_mode}' for this run.\n")
 
     epics = [e for e in args.epics if e in C.INSTRUMENTS] or list(C.INSTRUMENTS)
+    # The backtest deliberately includes instruments the live bot does not
+    # alert on: that is how an instrument earns its way back in, or stays out.
+    # Printed because a report mixing the two without saying so would read as
+    # the live bot's expectancy and be wrong.
+    measured_only = [e for e in epics if not C.INSTRUMENTS[e].get("live", True)]
+    if measured_only:
+        print(f"  measurement-only  : {' '.join(measured_only)}  "
+              f"(in this report, NOT alerted live)")
     cap_key, cap_id, cap_pw = (os.getenv("CAPITAL_API_KEY", ""),
                                os.getenv("CAPITAL_IDENTIFIER", ""),
                                os.getenv("CAPITAL_PASSWORD", ""))

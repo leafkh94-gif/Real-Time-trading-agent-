@@ -98,6 +98,8 @@ def entry_from_signal(sig, now: dt.datetime) -> dict:
         # excursion fields, filled in by resolve()
         "mfe_r": 0.0, "mae_r": 0.0, "mfe_r_optimistic": 0.0,
         "bars_since_alert": 0, "bars_to_fill": None, "bars_to_resolve": None,
+        # True when the resolving candle contained BOTH the stop and a target.
+        "ambiguous_exit": False,
         "last_bar_utc": None, "r_realized": None,
     }
 
@@ -147,6 +149,7 @@ def resolve(entry: dict, candles: pd.DataFrame) -> dict:
     entry.setdefault("mfe_r_optimistic", 0.0)
     entry.setdefault("bars_since_alert", 0)
     entry.setdefault("bars_to_fill", None)
+    entry.setdefault("ambiguous_exit", False)
     entry.setdefault("bars_to_resolve", None)
     entry.setdefault("last_bar_utc", None)
     entry.setdefault("r_realized", None)
@@ -225,6 +228,14 @@ def resolve(entry: dict, candles: pd.DataFrame) -> dict:
             hit_sl  = (bar["low"] <= entry["stop_loss"])  if buy else (bar["high"] >= entry["stop_loss"])
             hit_tp2 = (bar["high"] >= entry["take_profit2"]) if buy else (bar["low"] <= entry["take_profit2"])
             hit_tp1 = (bar["high"] >= entry["take_profit"])  if buy else (bar["low"] <= entry["take_profit"])
+            # One H1 candle can contain BOTH the stop and a target. Which came
+            # first is unknowable from OHLC alone, and this resolver has always
+            # answered "the stop". That is the safe answer, but a
+            # systematically pessimistic one — and the stop is the CLOSER
+            # level, so these candles are not rare. Flag them so a report can
+            # bracket the uncertainty instead of presenting one side as fact.
+            if hit_sl and (hit_tp1 or hit_tp2):
+                entry["ambiguous_exit"] = True
             if hit_sl:                       # conservative: SL first within a candle
                 entry["status"] = "sl_hit"
             elif hit_tp2:

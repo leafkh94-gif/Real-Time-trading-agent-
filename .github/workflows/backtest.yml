@@ -34,6 +34,12 @@ on:
         default: 'config'
         type: choice
         options: ['config', 'on', 'off']
+      orb:
+        description: 'Opening Range Breakout pattern'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'on', 'off']
       round_bonus:
         description: 'Round-number bonus'
         required: false
@@ -52,6 +58,16 @@ on:
         default: 'config'
         type: choice
         options: ['config', 'split', 'unified']
+      bias_tf:
+        description: 'Which timeframe decides the trend'
+        required: false
+        default: 'config'
+        type: choice
+        options: ['config', 'daily', 'h4']
+      min_rr:
+        description: 'Where TP1 sits in R (blank = config, currently 2.0). Lower = smaller, faster targets'
+        required: false
+        default: ''
       watch_min:
         description: 'Score threshold to publish at all (blank = config, currently 72)'
         required: false
@@ -130,6 +146,9 @@ jobs:
           if [ "${{ github.event.inputs.sweep_bos }}" != "config" ]; then
             ARGS="$ARGS --sweep-bos ${{ github.event.inputs.sweep_bos }}"
           fi
+          if [ "${{ github.event.inputs.orb }}" != "config" ]; then
+            ARGS="$ARGS --orb ${{ github.event.inputs.orb }}"
+          fi
           if [ "${{ github.event.inputs.round_bonus }}" != "config" ]; then
             ARGS="$ARGS --round-bonus ${{ github.event.inputs.round_bonus }}"
           fi
@@ -141,6 +160,12 @@ jobs:
           fi
           if [ "${{ github.event.inputs.tier_mode }}" != "config" ]; then
             ARGS="$ARGS --tier-mode ${{ github.event.inputs.tier_mode }}"
+          fi
+          if [ "${{ github.event.inputs.bias_tf }}" != "config" ]; then
+            ARGS="$ARGS --bias-tf ${{ github.event.inputs.bias_tf }}"
+          fi
+          if [ -n "${{ github.event.inputs.min_rr }}" ]; then
+            ARGS="$ARGS --min-rr ${{ github.event.inputs.min_rr }}"
           fi
           if [ -n "${{ github.event.inputs.watch_min }}" ]; then
             ARGS="$ARGS --watch-min ${{ github.event.inputs.watch_min }}"
