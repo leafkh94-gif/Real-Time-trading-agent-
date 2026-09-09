@@ -85,6 +85,7 @@ def normalize(entries: list[dict]) -> pd.DataFrame:
             "mfe_r_optimistic": e.get("mfe_r_optimistic"),
             "bars_to_fill": e.get("bars_to_fill"),
             "bars_to_resolve": e.get("bars_to_resolve"),
+            "ambiguous_exit": bool(e.get("ambiguous_exit", False)),
             "sl_distance_atr": e.get("sl_distance_atr"),
             "entry_dist_atr": e.get("entry_dist_atr"),
             "r_realized": e.get("r_realized") if e.get("r_realized") is not None
@@ -272,6 +273,48 @@ def section_counterfactuals(df: pd.DataFrame) -> None:
     print("        the rule itself would not have changed it. The stop-widening")
     print("        rows are a RANGE because trades that survive a wider stop have")
     print("        no recorded outcome beyond the original stop. Indicative only.")
+
+
+def section_ambiguous(df: pd.DataFrame) -> None:
+    """How much of the result rests on an unknowable intrabar path?
+
+    When one candle contains both the stop and a target, OHLC cannot say which
+    came first. The resolver always answers "the stop" — safe, but systematically
+    pessimistic, and the stop is the CLOSER level so these candles are common.
+
+    Every such trade is booked as a full loss today. Booking them all as wins
+    instead is equally unjustified; the truth is somewhere between. This prints
+    both ends so nobody mistakes one for the answer. Anything that only holds at
+    one end of this bracket is not a finding.
+    """
+    d = df[df["settled"]].copy()
+    d = d[d["r_realized"].notna()]
+    if d.empty or "ambiguous_exit" not in d:
+        return
+    amb = d["ambiguous_exit"].fillna(False).astype(bool)
+    n_amb = int(amb.sum())
+    print("\n" + "=" * 72)
+    print("INTRABAR AMBIGUITY  — how much of this rests on a coin flip?")
+    print("=" * 72)
+    if not n_amb:
+        print("  none: no trade resolved on a candle holding both stop and target.")
+        return
+    base = d["r_realized"].astype(float)
+    # The optimistic end: those trades take TP1 instead of the stop.
+    tp1_r = float(C.MIN_RR)
+    opt = base.where(~amb, tp1_r)
+    print(f"  {n_amb} of {len(d)} settled trades ({n_amb / len(d):.0%}) resolved on a")
+    print("  candle that held the stop AND a target. All are booked as losses.")
+    print()
+    print(f"  as booked (stop first) : total {base.sum():+7.1f}R  "
+          f"per trade {base.mean():+.3f}R")
+    print(f"  if target came first   : total {opt.sum():+7.1f}R  "
+          f"per trade {opt.mean():+.3f}R")
+    print()
+    print("  The true figure lies between these. Neither end is the answer, and")
+    print("  a conclusion that only survives at one end is not a finding.")
+    print("  Narrowing this needs finer candles (M15/M5) at resolution time,")
+    print("  not a different assumption.")
 
 
 def section_targets(df: pd.DataFrame) -> None:
@@ -553,6 +596,7 @@ def main() -> None:
     section_mfe(df, args.min_n)
     section_pattern_edge(df)
     section_counterfactuals(df)
+    section_ambiguous(df)
     section_targets(df)
     section_fills(df)
     section_dimensions(df, args.min_n)
