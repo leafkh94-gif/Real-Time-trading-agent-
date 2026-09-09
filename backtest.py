@@ -167,6 +167,10 @@ def main() -> None:
                     help="session bonus table (default: config)")
     ap.add_argument("--tier-mode", choices=["split", "unified"], default=None,
                     help="A+/WATCH split or one tier (default: config)")
+    ap.add_argument("--min-rr", type=float, default=None,
+                    help="where TP1 sits, in R. Lower = hit more often but "
+                         "each win pays less; break-even win rate is "
+                         "1/(1+RR). TP2 stays one R above TP1")
     ap.add_argument("--watch-min", type=float, default=None,
                     help="score threshold to publish a signal at all. The "
                          "measured score does not rank outcomes, so this "
@@ -204,6 +208,8 @@ def main() -> None:
         C.TIER_MODE = args.tier_mode
     if args.watch_min is not None:
         C.WATCH_MIN = args.watch_min
+    if args.min_rr is not None:
+        C.MIN_RR = args.min_rr
     if args.sl_mult is not None:
         C.SL_DISTANCE_MULT = args.sl_mult
     if args.tp_structure:
@@ -223,6 +229,8 @@ def main() -> None:
     print(f"  session weights  : {C.SESSION_WEIGHTS_MODE}")
     print(f"  tier mode        : {C.TIER_MODE}")
     print(f"  score threshold  : {C.WATCH_MIN}")
+    print(f"  TP1 at           : {C.MIN_RR}R  (break-even win rate "
+          f"{1 / (1 + C.MIN_RR):.0%})")
     print(f"  stop multiplier  : {C.SL_DISTANCE_MULT}  (targets fixed)")
     print(f"  TP structure chk : {'on' if C.TP_STRUCTURE_CHECK else 'off'}")
     print(f"  SD level unbroken: {'on' if C.SD_REQUIRE_LEVEL_UNBROKEN else 'off'}")

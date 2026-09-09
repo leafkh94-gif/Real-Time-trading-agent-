@@ -52,6 +52,10 @@ on:
         default: 'config'
         type: choice
         options: ['config', 'split', 'unified']
+      min_rr:
+        description: 'Where TP1 sits in R (blank = config, currently 2.0). Lower = smaller, faster targets'
+        required: false
+        default: ''
       watch_min:
         description: 'Score threshold to publish at all (blank = config, currently 72)'
         required: false
@@ -141,6 +145,9 @@ jobs:
           fi
           if [ "${{ github.event.inputs.tier_mode }}" != "config" ]; then
             ARGS="$ARGS --tier-mode ${{ github.event.inputs.tier_mode }}"
+          fi
+          if [ -n "${{ github.event.inputs.min_rr }}" ]; then
+            ARGS="$ARGS --min-rr ${{ github.event.inputs.min_rr }}"
           fi
           if [ -n "${{ github.event.inputs.watch_min }}" ]; then
             ARGS="$ARGS --watch-min ${{ github.event.inputs.watch_min }}"

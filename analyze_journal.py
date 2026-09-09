@@ -274,6 +274,71 @@ def section_counterfactuals(df: pd.DataFrame) -> None:
     print("        no recorded outcome beyond the original stop. Indicative only.")
 
 
+def section_targets(df: pd.DataFrame) -> None:
+    """Would a SMALLER target have been hit?
+
+    Answers the complaint "the trades never even come close to the target"
+    directly from recorded data. A trade reached R multiple T if and only if
+    its mfe_r >= T: excursion tracking stops when the trade closes, so any
+    recorded maximum was reached BEFORE the stop or the break-even scratch.
+
+    Each row re-prices the SAME trades under the SAME stop and the SAME
+    break-even rule, changing only where TP1 sits. No trade is added or
+    removed, so the comparison is clean — this is arithmetic on what already
+    happened, not a new strategy.
+
+    What it CANNOT tell you: how much sooner a lower target would have closed
+    the trade. The journal records when a trade resolved, not when it first
+    touched each R level. Time-to-resolution below is the CURRENT 2R figure —
+    a smaller target necessarily resolves no later, but by how much is not
+    measurable from this data.
+    """
+    d = df[df["settled"] | (df["outcome"] == "scratch")].copy()
+    d = d[d["mfe_r"].notna()]
+    if d.empty:
+        print("\nTARGET SWEEP: no settled trades with excursion data.")
+        return
+    mfe = d["mfe_r"].astype(float)
+    be_at = float(getattr(C, "BREAKEVEN_AT_R", 1.0))
+    be_on = bool(getattr(C, "BREAKEVEN_ENABLED", False))
+
+    print("\n" + "=" * 72)
+    print("TARGET SWEEP  — would a smaller TP1 have been reached?")
+    print("=" * 72)
+    print(f"  same trades, same stop, same break-even; only TP1 moves  (n={len(d)})")
+    print()
+    print(f"  {'TP1':>6}{'hit':>7}{'hit rate':>10}{'scratch':>9}{'loss':>6}"
+          f"{'total R':>10}{'per trade':>11}")
+    print("  " + "-" * 57)
+    for t in (0.75, 1.0, 1.25, 1.5, 2.0, 2.5):
+        win = mfe >= t
+        # Break-even can only rescue a trade that missed the target but still
+        # ran far enough to arm the stop — impossible when the target is below
+        # the arming level, which is why the column empties out at TP1 <= 1.0R.
+        scratch = (~win) & be_on & (mfe >= be_at)
+        loss = ~(win | scratch)
+        total = win.sum() * t - loss.sum()
+        marker = "   <- current" if abs(t - float(C.MIN_RR)) < 1e-9 else ""
+        print(f"  {t:>5.2f}R{win.sum():>7}{win.mean():>9.0%}{scratch.sum():>9}"
+              f"{loss.sum():>6}{total:>+9.1f}R{total / len(d):>+10.3f}R{marker}")
+
+    print()
+    print("  NOTE: a lower target wins more often but each win pays less. The")
+    print("        break-even win rate is 1/(1+TP1): 50% at 1.0R, 33% at 2.0R.")
+    print("        Reaching a level is not the same as filling there — a real")
+    print("        limit at TP1 needs price to trade THROUGH it, so treat the")
+    print("        hit counts as an upper bound.")
+
+    res = d["bars_to_resolve"].dropna().astype(float) if "bars_to_resolve" in d else pd.Series(dtype=float)
+    if len(res):
+        print()
+        print(f"  time to resolve at the CURRENT {C.MIN_RR}R target (H1 bars = hours):")
+        print(f"    median {res.median():.0f}h | 25th {res.quantile(.25):.0f}h | "
+              f"75th {res.quantile(.75):.0f}h | max {res.max():.0f}h")
+        within = (res <= 2).mean()
+        print(f"    resolved within 2 hours: {within:.0%}")
+
+
 def section_fills(df: pd.DataFrame) -> None:
     print("\n" + "=" * 72)
     print("FILL / EXPIRY  — a setup that never fills is a different failure")
@@ -488,6 +553,7 @@ def main() -> None:
     section_mfe(df, args.min_n)
     section_pattern_edge(df)
     section_counterfactuals(df)
+    section_targets(df)
     section_fills(df)
     section_dimensions(df, args.min_n)
 
