@@ -299,11 +299,12 @@ INSTRUMENTS = {
                "volatile_atr_pct": 0.012,         # CALIBRATE — FX ranges are tighter
                "entry_mode": "retrace_limit",
                "correlated_group": None, "always_open": False},
-    "GER40":  {"name": "DAX 40",     "asset": "index",  "session": "europe",
+    "DE40":   {"name": "Germany 40", "asset": "index",  "session": "europe",
                "atr_max": 4.0, "atr_min": 2.0, "round_step": 100,   "round_prox": 0.0012,
-               # Not an epic on this account — every request 404s and the run
-               # reports "received 0 bars". Off until find_epic.py returns the
-               # real name; live it would only spam the log with 404s.
+               # Was "GER40", which 404s on this account. find_epic.py returned
+               # the real name: DE40 / "Germany 40" / INDICES / TRADEABLE.
+               # Benched until it has actually been measured — a name that
+               # resolves is not the same as an instrument that wins.
                "live": False,
                "volatile_atr_pct": 0.018,         # CALIBRATE
                "entry_mode": "bos_close",

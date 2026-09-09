@@ -105,6 +105,6 @@ def test_the_backtest_still_sees_the_measurement_only_instruments():
     # The flag must not shrink the sample — that would delete the evidence
     # that put the instrument on the bench in the first place.
     import strategy.strategy_config as C
-    for epic in ("GOLD", "EURUSD", "GER40"):
+    for epic in ("GOLD", "EURUSD", "DE40"):
         assert C.INSTRUMENTS[epic]["live"] is False
         assert epic in C.INSTRUMENTS
