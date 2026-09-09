@@ -186,6 +186,13 @@ SESSION_TABLES = {
         ((7, 0),   (12, 30), 3),   # London    (+3  per v3)
         ((0, 0),   (7, 0),   2),   # Asia
     ],
+    # European index and FX: the liquid window is the London morning and the
+    # London/New York overlap, not the US cash session alone.
+    "europe": [
+        ((7, 0),   (12, 30), 8),   # London morning
+        ((12, 30), (16, 0),  6),   # overlap with New York
+        ((0, 0),   (7, 0),   2),   # Asia
+    ],
 }
 # Measured weights. New York carries the biggest bonus (+10) and produced the
 # WORST results in both backtest runs (10-17% win rate); London carries +4/+3
@@ -202,6 +209,11 @@ SESSION_TABLES_MEASURED = {
         ((12, 30), (16, 0), 2),
         ((7, 0),   (12, 30), 10),
         ((0, 0),   (7, 0),   6),
+    ],
+    "europe": [
+        ((7, 0),   (12, 30), 8),
+        ((12, 30), (16, 0),  6),
+        ((0, 0),   (7, 0),   2),
     ],
 }
 SESSION_WEIGHTS_MODE = "v3"        # "v3" (as designed) | "measured" (inverted)
@@ -257,6 +269,37 @@ INSTRUMENTS = {
                "volatile_atr_pct": 0.05,          # CALIBRATE — crypto is structurally more volatile
                "entry_mode": "retrace_limit",     # control group for the A/B
                "correlated_group": None, "always_open": True},
+
+    # ── Added for STATISTICAL POWER, not for "more opportunities" ────────────
+    # The three US indices above move together: as a sample they count closer
+    # to one series than to three, which is why 119 decided trades could not
+    # separate a 37.8% win rate from the 33.3% break-even. Separating those at
+    # 95% needs roughly 450 trades. Assets that move for DIFFERENT reasons add
+    # independent observations; a fourth US index would add almost none.
+    #
+    # Every number below is CALIBRATE. They are starting points chosen by
+    # analogy, and the backtest is what validates them — including the epic
+    # names themselves, which show up as "received 0 bars" if wrong.
+    "GOLD":   {"name": "Gold",       "asset": "metal",  "session": "index_sp_dow",
+               "atr_max": 4.0, "atr_min": 2.0, "round_step": 50,    "round_prox": 0.0012,
+               "volatile_atr_pct": 0.025,         # CALIBRATE
+               "entry_mode": "bos_close",
+               "correlated_group": None, "always_open": False},
+    "EURUSD": {"name": "EUR/USD",    "asset": "fx",     "session": "europe",
+               "atr_max": 4.0, "atr_min": 2.0, "round_step": 0.005, "round_prox": 0.0012,
+               "volatile_atr_pct": 0.012,         # CALIBRATE — FX ranges are tighter
+               "entry_mode": "retrace_limit",
+               "correlated_group": None, "always_open": False},
+    "GER40":  {"name": "DAX 40",     "asset": "index",  "session": "europe",
+               "atr_max": 4.0, "atr_min": 2.0, "round_step": 100,   "round_prox": 0.0012,
+               "volatile_atr_pct": 0.018,         # CALIBRATE
+               "entry_mode": "bos_close",
+               "correlated_group": "eu_indices", "always_open": False},
+    "OIL_CRUDE": {"name": "Crude Oil", "asset": "energy", "session": "index_sp_dow",
+               "atr_max": 4.0, "atr_min": 2.0, "round_step": 1.0,   "round_prox": 0.0015,
+               "volatile_atr_pct": 0.035,         # CALIBRATE — energy swings hard
+               "entry_mode": "bos_close",
+               "correlated_group": None, "always_open": False},
 }
 
 # Limit entries further than this from the confirmation close are dropped.
