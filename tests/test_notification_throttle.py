@@ -148,3 +148,50 @@ def test_heartbeat_explains_why_nothing_fired():
 def _logger():
     import logging
     return logging.getLogger("test")
+
+
+# ── the banner must name the real watchlist ───────────────────────────────
+#
+# It was a hand-written string literal. When DE40 and OIL_CRUDE went live the
+# message still read "S&P 500, Nasdaq 100, Dow Jones, Bitcoin", while the log
+# line one statement later printed all six from WATCHLIST. Two sources of truth
+# for the same fact, disagreeing in the same second, and only the wrong one was
+# visible to the user.
+
+def _startup_banner():
+    """Run the startup branch and return the HTML it sent."""
+    n = FakeNotifier()
+    state = M.BotState()
+    state.last_start_notify = 0.0        # long enough ago to fire
+    M._maybe_send_startup(n, M.logging.getLogger("t"), state)
+    assert n.sent, "startup branch did not notify"
+    return n.sent[0]
+
+
+def test_startup_banner_names_every_live_instrument():
+    banner = _startup_banner()
+    for instr in M.INSTRUMENTS:
+        assert instr.name in banner or _escaped(instr.name) in banner, (
+            f"{instr.name} is on the watchlist but missing from the banner")
+
+
+def test_startup_banner_names_nothing_that_is_benched():
+    import strategy.strategy_config as C
+    banner = _startup_banner()
+    for epic, cfg in C.INSTRUMENTS.items():
+        if not cfg.get("live", True):
+            assert cfg["name"] not in banner, (
+                f"{epic} is measurement-only but the banner claims to watch it")
+
+
+def test_ampersand_in_a_name_is_escaped():
+    # "S&P 500" raw would be invalid HTML; Telegram can reject the whole
+    # message for it, which turns a cosmetic bug into a silent outage.
+    banner = _startup_banner()
+    assert "S&amp;P 500" in banner
+    assert "S&P 500" not in banner.replace("S&amp;P 500", "")
+
+
+def _escaped(s):
+    from html import escape
+    return escape(s)
