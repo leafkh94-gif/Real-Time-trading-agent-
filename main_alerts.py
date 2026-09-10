@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from collections import Counter
+from html import escape as _esc
 from dataclasses import dataclass, field, asdict
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -281,6 +282,39 @@ def _drain_funnels(strategies, state, logger) -> None:
     logger.info("Funnel today:\n%s", funnel_report(state.funnel))
 
 
+# ── Startup banner ────────────────────────────────────────────────────────────
+def _maybe_send_startup(notifier, logger, state) -> bool:
+    """Announce a genuine (re)start. Returns True if a message was sent.
+
+    Lived inline in main() as a hand-written string literal, which is how it
+    came to say "S&P 500, Nasdaq 100, Dow Jones, Bitcoin" for a whole night
+    after DE40 and OIL_CRUDE went live: the log line one statement later read
+    the real WATCHLIST and disagreed with the message in the same second. Two
+    sources of truth for one fact, and only the wrong one reached the user.
+
+    Persisting the new timestamp is left to the caller so this stays a pure
+    notify — the tests can run it without writing the state file.
+    """
+    started = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    if time.time() - state.last_start_notify < STARTUP_NOTIFY_INTERVAL_S:
+        # The bot exits every few hours so the journal uploads; announcing each
+        # handoff would be ~16 identical messages a day. A cold start after a
+        # real outage is still worth knowing about, hence an interval rather
+        # than silence.
+        logger.info("Startup at %s — notification suppressed (chained handoff); "
+                    "watching %s", started, ", ".join(WATCHLIST))
+        return False
+
+    watching = ", ".join(i.name for i in INSTRUMENTS)
+    _notify(notifier,
+            f"🟡 <b>Alert bot started</b> — <i>{started}</i>\n"
+            f"Watching {_esc(watching)}. Scanning every 30 min on H1 candles.",
+            f"Alert bot started {started}. Watching {', '.join(WATCHLIST)}.")
+    state.last_start_notify = time.time()
+    logger.info("Startup notification sent — watching %s", ", ".join(WATCHLIST))
+    return True
+
+
 # ── Heartbeat ─────────────────────────────────────────────────────────────────
 def _maybe_send_heartbeat(notifier, instruments, logger, state) -> None:
     """Daily 'still running' check-in. Timing lives in persisted state so it
@@ -291,7 +325,7 @@ def _maybe_send_heartbeat(notifier, instruments, logger, state) -> None:
     if any(time.time() - i._last_alert < HEARTBEAT_INTERVAL_S for i in instruments):
         state.last_heartbeat = time.time()
         return
-    markets = ", ".join(i.name for i in instruments)
+    markets = _esc(", ".join(i.name for i in instruments))
     # "No setups" on its own is indistinguishable from a broken bot. Naming the
     # gate that rejected the most candidates makes a quiet day readable: a
     # market with no patterns is a different situation from a market full of
@@ -412,18 +446,8 @@ def main() -> None:
     # meant ~16 identical "started" messages a day. A cold start after a real
     # outage is still worth knowing about, hence the interval rather than
     # silence.
-    started = _utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    if time.time() - state.last_start_notify >= STARTUP_NOTIFY_INTERVAL_S:
-        _notify(notifier,
-                f"🟡 <b>Alert bot started</b> — <i>{started}</i>\n"
-                "Watching S&amp;P 500, Nasdaq 100, Dow Jones, Bitcoin. Scanning every 30 min on H1 candles.",
-                f"Alert bot started {started}. Watching US500, US100, US30, BTCUSD.")
-        state.last_start_notify = time.time()
+    if _maybe_send_startup(notifier, logger, state):
         _save_state(state)
-        logger.info("Startup notification sent — watching %s", ", ".join(WATCHLIST))
-    else:
-        logger.info("Startup at %s — notification suppressed (chained handoff); "
-                    "watching %s", started, ", ".join(WATCHLIST))
 
     max_runtime_s = int(os.getenv("MAX_RUNTIME_S", "0"))
     start_time = time.time()
